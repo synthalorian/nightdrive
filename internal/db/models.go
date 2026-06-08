@@ -20,20 +20,23 @@ type Album struct {
 
 // Track represents a single track.
 type Track struct {
-	ID          int64   `json:"id"`
-	AlbumID     *int64  `json:"albumId,omitempty"`
-	ArtistID    *int64  `json:"artistId,omitempty"`
-	Title       string  `json:"title"`
-	ArtistName  string  `json:"artistName"`
-	AlbumTitle  string  `json:"albumTitle"`
-	DiscNumber  int     `json:"discNumber"`
-	TrackNumber int     `json:"trackNumber"`
-	Duration    float64 `json:"duration"`
-	Bitrate     int     `json:"bitrate"`
-	Format      string  `json:"format"`
-	Path        string  `json:"path"`
-	Mtime       int64   `json:"mtime"`
-	Size        int64   `json:"size"`
+	ID               int64   `json:"id"`
+	AlbumID          *int64  `json:"albumId,omitempty"`
+	ArtistID         *int64  `json:"artistId,omitempty"`
+	Title            string  `json:"title"`
+	ArtistName       string  `json:"artistName"`
+	AlbumTitle       string  `json:"albumTitle"`
+	DiscNumber       int     `json:"discNumber"`
+	TrackNumber      int     `json:"trackNumber"`
+	Duration         float64 `json:"duration"`
+	Bitrate          int     `json:"bitrate"`
+	Format           string  `json:"format"`
+	Path             string  `json:"path"`
+	Mtime            int64   `json:"mtime"`
+	Size             int64   `json:"size"`
+	Lyrics           string  `json:"lyrics"`
+	MediaType        string  `json:"mediaType"`
+	PlaybackPosition float64 `json:"playbackPosition"`
 }
 
 // Playlist represents a user or smart playlist.

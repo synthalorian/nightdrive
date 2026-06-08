@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -56,6 +57,9 @@ CREATE TABLE IF NOT EXISTS tracks (
 	path TEXT NOT NULL UNIQUE,
 	mtime INTEGER,
 	size INTEGER,
+	lyrics TEXT,
+	media_type TEXT DEFAULT 'music',
+	playback_position REAL DEFAULT 0,
 	created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -82,5 +86,16 @@ CREATE INDEX IF NOT EXISTS idx_albums_artist ON albums(artist_id);
 	if _, err := d.Exec(schema); err != nil {
 		return fmt.Errorf("migrate: %w", err)
 	}
+	_ = d.migrateAddColumn("tracks", "lyrics", "TEXT")
+	_ = d.migrateAddColumn("tracks", "media_type", "TEXT DEFAULT 'music'")
+	_ = d.migrateAddColumn("tracks", "playback_position", "REAL DEFAULT 0")
 	return nil
+}
+
+func (d *DB) migrateAddColumn(table, col, def string) error {
+	_, err := d.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, col, def))
+	if err != nil && strings.Contains(err.Error(), "duplicate column name") {
+		return nil
+	}
+	return err
 }

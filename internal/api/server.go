@@ -37,6 +37,9 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/tracks/{id}", s.trackHandler)
 	mux.HandleFunc("GET /api/tracks/{id}/stream", s.streamHandler)
 	mux.HandleFunc("GET /api/tracks/{id}/cover", s.coverHandler)
+	mux.HandleFunc("GET /api/tracks/{id}/lyrics", s.lyricsHandler)
+	mux.HandleFunc("POST /api/tracks/{id}/lyrics", s.saveLyricsHandler)
+	mux.HandleFunc("POST /api/tracks/{id}/position", s.positionHandler)
 	mux.HandleFunc("GET /api/albums", s.albumsHandler)
 	mux.HandleFunc("GET /api/albums/{id}/tracks", s.albumTracksHandler)
 	mux.HandleFunc("GET /api/artists", s.artistsHandler)
@@ -82,7 +85,14 @@ func (s *Server) healthHandler(w http.ResponseWriter, r *http.Request) {
 func (s *Server) tracksHandler(w http.ResponseWriter, r *http.Request) {
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	tracks, err := s.db.Tracks(offset, limit)
+	mediaType := r.URL.Query().Get("mediaType")
+	var tracks []db.Track
+	var err error
+	if mediaType != "" {
+		tracks, err = s.db.TracksByMediaType(mediaType, offset, limit)
+	} else {
+		tracks, err = s.db.Tracks(offset, limit)
+	}
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -102,6 +112,60 @@ func (s *Server) trackHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, track)
+}
+
+func (s *Server) lyricsHandler(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid id"})
+		return
+	}
+	lyrics, err := s.db.TrackLyrics(id)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"lyrics": lyrics})
+}
+
+func (s *Server) saveLyricsHandler(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid id"})
+		return
+	}
+	var body struct {
+		Lyrics string `json:"lyrics"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	if err := s.db.UpdateTrackLyrics(id, body.Lyrics); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusNoContent, nil)
+}
+
+func (s *Server) positionHandler(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid id"})
+		return
+	}
+	var body struct {
+		Position float64 `json:"position"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	if err := s.db.UpdateTrackPosition(id, body.Position); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusNoContent, nil)
 }
 
 func (s *Server) streamHandler(w http.ResponseWriter, r *http.Request) {
