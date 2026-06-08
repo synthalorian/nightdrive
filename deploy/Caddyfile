@@ -1,0 +1,63 @@
+# NightDrive Caddy reverse proxy configuration
+# Place this in your Caddyfile or as a site config
+
+music.example.com {
+    # Reverse proxy to NightDrive
+    reverse_proxy localhost:4040 {
+        # Health check
+        health_uri /api/health
+        health_interval 30s
+        health_timeout 5s
+
+        # Headers
+        header_up Host {host}
+        header_up X-Real-IP {remote}
+        header_up X-Forwarded-For {remote}
+        header_up X-Forwarded-Proto {scheme}
+
+        # WebSocket support
+        header_up Connection {>Connection}
+        header_up Upgrade {>Upgrade}
+    }
+
+    # Automatic HTTPS (Let's Encrypt)
+    tls {
+        # Caddy automatically obtains and renews certificates
+        # You can also use your own:
+        # tls /path/to/cert.pem /path/to/key.pem
+    }
+
+    # Security headers
+    header {
+        X-Frame-Options "SAMEORIGIN"
+        X-Content-Type-Options "nosniff"
+        X-XSS-Protection "1; mode=block"
+        Referrer-Policy "strict-origin-when-cross-origin"
+    }
+
+    # Cache static assets
+    @static {
+        path *.js *.css *.png *.jpg *.jpeg *.gif *.ico *.svg *.woff *.woff2 *.ttf *.eot
+    }
+    header @static Cache-Control "public, max-age=31536000, immutable"
+
+    # Compression
+    encode gzip zstd
+
+    # Logging
+    log {
+        output file /var/log/caddy/nightdrive_access.log
+        format json
+    }
+
+    # Timeouts for long audio streams
+    timeout {
+        read 10m
+        write 10m
+    }
+}
+
+# Alternative: Simple local deployment without TLS
+# :80 {
+#     reverse_proxy localhost:4040
+# }

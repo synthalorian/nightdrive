@@ -187,9 +187,10 @@ func (e *Engine) AddToQueue(sessionID, trackID int64) error {
 // GetQueue returns the session queue.
 func (e *Engine) GetQueue(sessionID int64) ([]QueueItem, error) {
 	rows, err := e.db.Query(
-		`SELECT q.id, q.track_id, q.position, t.id, t.title, t.artist_name, t.duration
+		`SELECT q.id, q.track_id, q.position, t.id, t.title, COALESCE(a.name,'') AS artist_name, t.duration
 		 FROM playback_queue q
 		 JOIN tracks t ON t.id = q.track_id
+		 LEFT JOIN artists a ON a.id = t.artist_id
 		 WHERE q.session_id = ?
 		 ORDER BY q.position`, sessionID,
 	)
