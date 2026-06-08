@@ -60,12 +60,15 @@ CREATE TABLE IF NOT EXISTS tracks (
 	lyrics TEXT,
 	media_type TEXT DEFAULT 'music',
 	playback_position REAL DEFAULT 0,
+	genre TEXT,
 	created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS playlists (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	name TEXT NOT NULL,
+	owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+	visibility TEXT DEFAULT 'private',
 	smart_query TEXT,
 	created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 	updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -78,10 +81,46 @@ CREATE TABLE IF NOT EXISTS playlist_tracks (
 	PRIMARY KEY (playlist_id, track_id)
 );
 
+CREATE TABLE IF NOT EXISTS users (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	username TEXT NOT NULL UNIQUE,
+	password_hash TEXT NOT NULL,
+	role TEXT NOT NULL DEFAULT 'user',
+	created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	token TEXT NOT NULL UNIQUE,
+	expires_at DATETIME NOT NULL,
+	created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS playlist_shares (
+	playlist_id INTEGER REFERENCES playlists(id) ON DELETE CASCADE,
+	user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+	created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (playlist_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS plays (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+	played_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	duration_listened REAL DEFAULT 0,
+	completion_pct REAL DEFAULT 0
+);
+
 CREATE INDEX IF NOT EXISTS idx_tracks_album ON tracks(album_id);
 CREATE INDEX IF NOT EXISTS idx_tracks_artist ON tracks(artist_id);
 CREATE INDEX IF NOT EXISTS idx_tracks_path ON tracks(path);
 CREATE INDEX IF NOT EXISTS idx_albums_artist ON albums(artist_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token);
+CREATE INDEX IF NOT EXISTS idx_plays_user ON plays(user_id);
+CREATE INDEX IF NOT EXISTS idx_plays_track ON plays(track_id);
+CREATE INDEX IF NOT EXISTS idx_plays_played_at ON plays(played_at);
 `
 	if _, err := d.Exec(schema); err != nil {
 		return fmt.Errorf("migrate: %w", err)
@@ -89,6 +128,9 @@ CREATE INDEX IF NOT EXISTS idx_albums_artist ON albums(artist_id);
 	_ = d.migrateAddColumn("tracks", "lyrics", "TEXT")
 	_ = d.migrateAddColumn("tracks", "media_type", "TEXT DEFAULT 'music'")
 	_ = d.migrateAddColumn("tracks", "playback_position", "REAL DEFAULT 0")
+	_ = d.migrateAddColumn("tracks", "genre", "TEXT")
+	_ = d.migrateAddColumn("playlists", "owner_id", "INTEGER REFERENCES users(id) ON DELETE SET NULL")
+	_ = d.migrateAddColumn("playlists", "visibility", "TEXT DEFAULT 'private'")
 	return nil
 }
 

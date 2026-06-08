@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 
+	"golang.org/x/crypto/bcrypt"
+
 	"nightdrive/internal/api"
 	"nightdrive/internal/config"
 	"nightdrive/internal/db"
@@ -37,6 +39,16 @@ func main() {
 
 	if err := database.Migrate(); err != nil {
 		log.Fatalf("migrate db: %v", err)
+	}
+
+	users, _ := database.Users()
+	if len(users) == 0 {
+		hash, _ := bcrypt.GenerateFromPassword([]byte("admin"), bcrypt.DefaultCost)
+		if _, err := database.InsertUser("admin", string(hash), "admin"); err != nil {
+			log.Printf("[warn] create default admin: %v", err)
+		} else {
+			log.Println("[nightdrive] created default admin user (admin / admin)")
+		}
 	}
 
 	scan := scanner.New(cfg, database)

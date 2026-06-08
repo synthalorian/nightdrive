@@ -1,6 +1,9 @@
 package api
 
 import (
+	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 
 	"nightdrive/internal/config"
 	"nightdrive/internal/db"
@@ -29,30 +34,119 @@ func NewServer(cfg *config.Config, database *db.DB, s *scanner.Scanner) *Server 
 	return &Server{cfg: cfg, db: database, scanner: s}
 }
 
-// Register mounts all API and Subsonic routes.
+type contextKey int
+
+const userContextKey contextKey = iota
+
+func userFromContext(ctx context.Context) *db.User {
+	u, _ := ctx.Value(userContextKey).(*db.User)
+	return u
+}
+
+func hashPassword(pw string) (string, error) {
+	b, err := bcrypt.GenerateFromPassword([]byte(pw), bcrypt.DefaultCost)
+	return string(b), err
+}
+
+func checkPassword(pw, hash string) bool {
+	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(pw)) == nil
+}
+
+func generateToken() string {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 36)
+	}
+	return base64.URLEncoding.EncodeToString(b)
+}
+
+func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var user *db.User
+		if token := r.Header.Get("X-Auth-Token"); token != "" {
+			if sess, err := s.db.SessionByToken(token); err == nil {
+				if u, err := s.db.UserByID(sess.UserID); err == nil {
+					user = u
+				}
+			}
+		}
+		if user == nil {
+			if u, p, ok := r.BasicAuth(); ok {
+				if udb, err := s.db.UserByUsername(u); err == nil && checkPassword(p, udb.PasswordHash) {
+					user = udb
+				}
+			}
+		}
+		if user != nil {
+			r = r.WithContext(context.WithValue(r.Context(), userContextKey, user))
+		}
+		next(w, r)
+	}
+}
+
+func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
+	return s.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		if userFromContext(r.Context()) == nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		next(w, r)
+	})
+}
+
+func (s *Server) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
+	return s.requireAuth(func(w http.ResponseWriter, r *http.Request) {
+		u := userFromContext(r.Context())
+		if u == nil || u.Role != "admin" {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin required"})
+			return
+		}
+		next(w, r)
+	})
+}
+
 func (s *Server) Register(mux *http.ServeMux) {
-	// REST API
 	mux.HandleFunc("GET /api/health", s.healthHandler)
 	mux.HandleFunc("GET /api/tracks", s.tracksHandler)
 	mux.HandleFunc("GET /api/tracks/{id}", s.trackHandler)
 	mux.HandleFunc("GET /api/tracks/{id}/stream", s.streamHandler)
 	mux.HandleFunc("GET /api/tracks/{id}/cover", s.coverHandler)
 	mux.HandleFunc("GET /api/tracks/{id}/lyrics", s.lyricsHandler)
-	mux.HandleFunc("POST /api/tracks/{id}/lyrics", s.saveLyricsHandler)
-	mux.HandleFunc("POST /api/tracks/{id}/position", s.positionHandler)
+	mux.HandleFunc("POST /api/tracks/{id}/lyrics", s.requireAuth(s.saveLyricsHandler))
+	mux.HandleFunc("POST /api/tracks/{id}/position", s.requireAuth(s.positionHandler))
 	mux.HandleFunc("GET /api/albums", s.albumsHandler)
 	mux.HandleFunc("GET /api/albums/{id}/tracks", s.albumTracksHandler)
 	mux.HandleFunc("GET /api/artists", s.artistsHandler)
 	mux.HandleFunc("GET /api/search", s.searchHandler)
-	mux.HandleFunc("GET /api/playlists", s.playlistsHandler)
-	mux.HandleFunc("POST /api/playlists", s.createPlaylistHandler)
+	mux.HandleFunc("GET /api/playlists", s.authMiddleware(s.playlistsHandler))
+	mux.HandleFunc("POST /api/playlists", s.requireAuth(s.createPlaylistHandler))
 	mux.HandleFunc("GET /api/playlists/{id}/tracks", s.playlistTracksHandler)
-	mux.HandleFunc("POST /api/playlists/{id}/tracks", s.addPlaylistTrackHandler)
-	mux.HandleFunc("DELETE /api/playlists/{id}/tracks/{trackId}", s.removePlaylistTrackHandler)
-	mux.HandleFunc("DELETE /api/playlists/{id}", s.deletePlaylistHandler)
-	mux.HandleFunc("POST /api/scan", s.scanHandler)
+	mux.HandleFunc("POST /api/playlists/{id}/tracks", s.requireAuth(s.addPlaylistTrackHandler))
+	mux.HandleFunc("DELETE /api/playlists/{id}/tracks/{trackId}", s.requireAuth(s.removePlaylistTrackHandler))
+	mux.HandleFunc("DELETE /api/playlists/{id}", s.requireAuth(s.deletePlaylistHandler))
+	mux.HandleFunc("POST /api/playlists/{id}/share", s.requireAuth(s.sharePlaylistHandler))
+	mux.HandleFunc("DELETE /api/playlists/{id}/share/{userId}", s.requireAuth(s.unsharePlaylistHandler))
+	mux.HandleFunc("POST /api/scan", s.requireAdmin(s.scanHandler))
 
-	// Subsonic API compatibility
+	mux.HandleFunc("POST /api/auth/login", s.loginHandler)
+	mux.HandleFunc("POST /api/auth/logout", s.requireAuth(s.logoutHandler))
+	mux.HandleFunc("GET /api/auth/me", s.authMiddleware(s.meHandler))
+
+	mux.HandleFunc("GET /api/users", s.requireAdmin(s.listUsersHandler))
+	mux.HandleFunc("POST /api/users", s.requireAdmin(s.createUserHandler))
+	mux.HandleFunc("DELETE /api/users/{id}", s.requireAdmin(s.deleteUserHandler))
+
+	mux.HandleFunc("POST /api/plays", s.requireAuth(s.recordPlayHandler))
+	mux.HandleFunc("GET /api/history", s.requireAuth(s.historyHandler))
+	mux.HandleFunc("GET /api/stats", s.requireAuth(s.statsHandler))
+
+	mux.HandleFunc("GET /api/recommendations/similar-albums", s.similarAlbumsHandler)
+	mux.HandleFunc("GET /api/recommendations/similar-artists", s.similarArtistsHandler)
+	mux.HandleFunc("GET /api/recommendations/tracks", s.requireAuth(s.recommendedTracksHandler))
+
+	mux.HandleFunc("GET /api/radio", s.radioHandler)
+	mux.HandleFunc("GET /api/genres", s.genresHandler)
+
 	mux.HandleFunc("GET /rest/ping", s.subsonicHandler(s.subPing))
 	mux.HandleFunc("GET /rest/getLicense", s.subsonicHandler(s.subLicense))
 	mux.HandleFunc("GET /rest/getMusicFolders", s.subsonicHandler(s.subMusicFolders))
@@ -281,7 +375,13 @@ func (s *Server) searchHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) playlistsHandler(w http.ResponseWriter, r *http.Request) {
-	pls, err := s.db.Playlists()
+	var pls []db.Playlist
+	var err error
+	if u := userFromContext(r.Context()); u != nil {
+		pls, err = s.db.PlaylistsForUser(u.ID)
+	} else {
+		pls, err = s.db.PlaylistsForUser(0)
+	}
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -307,7 +407,12 @@ func (s *Server) createPlaylistHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sq := r.URL.Query().Get("smartQuery")
-	id, err := s.db.InsertPlaylist(name, sq)
+	u := userFromContext(r.Context())
+	ownerID := int64(0)
+	if u != nil {
+		ownerID = u.ID
+	}
+	id, err := s.db.InsertPlaylistWithOwner(name, sq, ownerID, "private")
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -341,6 +446,12 @@ func (s *Server) addPlaylistTrackHandler(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "playlist and track required"})
 		return
 	}
+	ownerID, _ := s.db.PlaylistOwner(pid)
+	u := userFromContext(r.Context())
+	if u != nil && ownerID != 0 && ownerID != u.ID && u.Role != "admin" {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "not owner"})
+		return
+	}
 	if err := s.db.AddPlaylistTrack(pid, tid); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -351,6 +462,12 @@ func (s *Server) addPlaylistTrackHandler(w http.ResponseWriter, r *http.Request)
 func (s *Server) removePlaylistTrackHandler(w http.ResponseWriter, r *http.Request) {
 	pid, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	tid, _ := strconv.ParseInt(r.PathValue("trackId"), 10, 64)
+	ownerID, _ := s.db.PlaylistOwner(pid)
+	u := userFromContext(r.Context())
+	if u != nil && ownerID != 0 && ownerID != u.ID && u.Role != "admin" {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "not owner"})
+		return
+	}
 	if err := s.db.RemovePlaylistTrack(pid, tid); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -360,11 +477,253 @@ func (s *Server) removePlaylistTrackHandler(w http.ResponseWriter, r *http.Reque
 
 func (s *Server) deletePlaylistHandler(w http.ResponseWriter, r *http.Request) {
 	pid, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	ownerID, _ := s.db.PlaylistOwner(pid)
+	u := userFromContext(r.Context())
+	if u != nil && ownerID != 0 && ownerID != u.ID && u.Role != "admin" {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "not owner"})
+		return
+	}
 	if err := s.db.DeletePlaylist(pid); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusNoContent, nil)
+}
+
+func (s *Server) sharePlaylistHandler(w http.ResponseWriter, r *http.Request) {
+	pid, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	var body struct {
+		UserID int64 `json:"userId"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	ownerID, _ := s.db.PlaylistOwner(pid)
+	u := userFromContext(r.Context())
+	if u != nil && ownerID != 0 && ownerID != u.ID && u.Role != "admin" {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "not owner"})
+		return
+	}
+	if err := s.db.SharePlaylist(pid, body.UserID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusNoContent, nil)
+}
+
+func (s *Server) unsharePlaylistHandler(w http.ResponseWriter, r *http.Request) {
+	pid, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	uid, _ := strconv.ParseInt(r.PathValue("userId"), 10, 64)
+	ownerID, _ := s.db.PlaylistOwner(pid)
+	u := userFromContext(r.Context())
+	if u != nil && ownerID != 0 && ownerID != u.ID && u.Role != "admin" {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "not owner"})
+		return
+	}
+	if err := s.db.UnsharePlaylist(pid, uid); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusNoContent, nil)
+}
+
+func (s *Server) loginHandler(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	u, err := s.db.UserByUsername(body.Username)
+	if err != nil || !checkPassword(body.Password, u.PasswordHash) {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid credentials"})
+		return
+	}
+	token := generateToken()
+	expiresAt := time.Now().Add(7 * 24 * time.Hour)
+	if _, err := s.db.CreateSession(u.ID, token, expiresAt); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"token": token, "user": u})
+}
+
+func (s *Server) logoutHandler(w http.ResponseWriter, r *http.Request) {
+	token := r.Header.Get("X-Auth-Token")
+	if token != "" {
+		_ = s.db.DeleteSession(token)
+	}
+	writeJSON(w, http.StatusNoContent, nil)
+}
+
+func (s *Server) meHandler(w http.ResponseWriter, r *http.Request) {
+	u := userFromContext(r.Context())
+	if u == nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"authenticated": false})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"authenticated": true, "user": u})
+}
+
+func (s *Server) listUsersHandler(w http.ResponseWriter, r *http.Request) {
+	users, err := s.db.Users()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, users)
+}
+
+func (s *Server) createUserHandler(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+		Role     string `json:"role"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	if body.Username == "" || body.Password == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "username and password required"})
+		return
+	}
+	if body.Role == "" {
+		body.Role = "user"
+	}
+	hash, err := hashPassword(body.Password)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	id, err := s.db.InsertUser(body.Username, string(hash), body.Role)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]int64{"id": id})
+}
+
+func (s *Server) deleteUserHandler(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	u := userFromContext(r.Context())
+	if u != nil && u.ID == id {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "cannot delete self"})
+		return
+	}
+	if err := s.db.DeleteUser(id); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusNoContent, nil)
+}
+
+func (s *Server) recordPlayHandler(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		TrackID          int64   `json:"trackId"`
+		DurationListened float64 `json:"durationListened"`
+		CompletionPct    float64 `json:"completionPct"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	u := userFromContext(r.Context())
+	if _, err := s.db.InsertPlay(u.ID, body.TrackID, body.DurationListened, body.CompletionPct); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]string{"status": "recorded"})
+}
+
+func (s *Server) historyHandler(w http.ResponseWriter, r *http.Request) {
+	u := userFromContext(r.Context())
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	plays, err := s.db.PlaysByUser(u.ID, offset, limit)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, plays)
+}
+
+func (s *Server) statsHandler(w http.ResponseWriter, r *http.Request) {
+	u := userFromContext(r.Context())
+	stats, err := s.db.StatsForUser(u.ID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, stats)
+}
+
+func (s *Server) similarAlbumsHandler(w http.ResponseWriter, r *http.Request) {
+	artistID, _ := strconv.ParseInt(r.URL.Query().Get("artistId"), 10, 64)
+	excludeID, _ := strconv.ParseInt(r.URL.Query().Get("excludeAlbumId"), 10, 64)
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	albums, err := s.db.SimilarAlbums(artistID, excludeID, limit)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, albums)
+}
+
+func (s *Server) similarArtistsHandler(w http.ResponseWriter, r *http.Request) {
+	artistID, _ := strconv.ParseInt(r.URL.Query().Get("artistId"), 10, 64)
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	artists, err := s.db.SimilarArtists(artistID, limit)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, artists)
+}
+
+func (s *Server) recommendedTracksHandler(w http.ResponseWriter, r *http.Request) {
+	u := userFromContext(r.Context())
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	tracks, err := s.db.RecommendedTracks(u.ID, limit)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, tracks)
+}
+
+func (s *Server) radioHandler(w http.ResponseWriter, r *http.Request) {
+	radioType := r.URL.Query().Get("type")
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	var tracks []db.Track
+	var err error
+	switch radioType {
+	case "genre":
+		genre := r.URL.Query().Get("genre")
+		tracks, err = s.db.RadioTracksByGenre(genre, limit)
+	case "artist":
+		artistID, _ := strconv.ParseInt(r.URL.Query().Get("artistId"), 10, 64)
+		tracks, err = s.db.RadioTracksByArtist(artistID, limit)
+	default:
+		tracks, err = s.db.RadioTracksRandom(limit)
+	}
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, tracks)
+}
+
+func (s *Server) genresHandler(w http.ResponseWriter, r *http.Request) {
+	genres, err := s.db.Genres()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, genres)
 }
 
 func (s *Server) scanHandler(w http.ResponseWriter, r *http.Request) {
@@ -379,13 +738,23 @@ func (s *Server) scanHandler(w http.ResponseWriter, r *http.Request) {
 // Subsonic helpers
 func (s *Server) subsonicHandler(fn func(w http.ResponseWriter, r *http.Request) interface{}) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		username := r.URL.Query().Get("u")
+		password := r.URL.Query().Get("p")
+		if username != "" && password != "" {
+			if strings.HasPrefix(password, "enc:") {
+				password = strings.TrimPrefix(password, "enc:")
+			}
+			if u, err := s.db.UserByUsername(username); err == nil && checkPassword(password, u.PasswordHash) {
+				r = r.WithContext(context.WithValue(r.Context(), userContextKey, u))
+			}
+		}
 		data := fn(w, r)
 		resp := map[string]interface{}{
 			"subsonic-response": map[string]interface{}{
 				"status":        "ok",
 				"version":       "1.16.1",
 				"type":          "nightdrive",
-				"serverVersion": "0.1.0",
+				"serverVersion": "0.5.0",
 				"openSubsonic":  true,
 			},
 		}
@@ -478,7 +847,16 @@ func (s *Server) subSearch3(w http.ResponseWriter, r *http.Request) interface{} 
 	return map[string]interface{}{"searchResult3": map[string]interface{}{"song": songs}}
 }
 func (s *Server) subPlaylists(w http.ResponseWriter, r *http.Request) interface{} {
-	pls, _ := s.db.Playlists()
+	var pls []db.Playlist
+	var err error
+	if u := userFromContext(r.Context()); u != nil {
+		pls, err = s.db.PlaylistsForUser(u.ID)
+	} else {
+		pls, err = s.db.PlaylistsForUser(0)
+	}
+	if err != nil {
+		pls = []db.Playlist{}
+	}
 	var out []map[string]interface{}
 	for _, p := range pls {
 		out = append(out, map[string]interface{}{"id": fmt.Sprintf("pl-%d", p.ID), "name": p.Name})
