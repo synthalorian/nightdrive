@@ -19,6 +19,7 @@ import (
 
 	"nightdrive/internal/cast"
 	"nightdrive/internal/config"
+	"nightdrive/internal/crashreport"
 	"nightdrive/internal/db"
 	"nightdrive/internal/dsp"
 	"nightdrive/internal/gapless"
@@ -29,13 +30,14 @@ import (
 
 // Server holds API dependencies.
 type Server struct {
-	cfg        *config.Config
-	db         *db.DB
-	scanner    *scanner.Scanner
-	playback   *playback.Engine
-	gapless    *gapless.Analyzer
-	castMgr    *cast.Manager
-	syncCoord  *syncpkg.Coordinator
+	cfg          *config.Config
+	db           *db.DB
+	scanner      *scanner.Scanner
+	playback     *playback.Engine
+	gapless      *gapless.Analyzer
+	castMgr      *cast.Manager
+	syncCoord    *syncpkg.Coordinator
+	crashReporter *crashreport.Reporter
 }
 
 // castStoreAdapter adapts *db.DB to cast.DeviceStore.
@@ -76,16 +78,17 @@ func (a *castStoreAdapter) DeleteCastDevice(id int64) error {
 }
 
 // NewServer creates an API server.
-func NewServer(cfg *config.Config, database *db.DB, s *scanner.Scanner) *Server {
+func NewServer(cfg *config.Config, database *db.DB, s *scanner.Scanner, reporter *crashreport.Reporter) *Server {
 	eng := playback.NewEngine(database)
 	return &Server{
-		cfg:       cfg,
-		db:        database,
-		scanner:   s,
-		playback:  eng,
-		gapless:   gapless.NewAnalyzer(database),
-		castMgr:   cast.NewManager(&castStoreAdapter{db: database}),
-		syncCoord: syncpkg.NewCoordinator(database, eng),
+		cfg:           cfg,
+		db:            database,
+		scanner:       s,
+		playback:      eng,
+		gapless:       gapless.NewAnalyzer(database),
+		castMgr:       cast.NewManager(&castStoreAdapter{db: database}),
+		syncCoord:     syncpkg.NewCoordinator(database, eng),
+		crashReporter: reporter,
 	}
 }
 
@@ -162,6 +165,8 @@ func (s *Server) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 
 func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/health", s.healthHandler)
+	mux.HandleFunc("POST /api/feedback", s.feedbackHandler)
+	mux.HandleFunc("GET /api/admin/crashes", s.requireAdmin(s.crashesHandler))
 	mux.HandleFunc("GET /api/tracks", s.tracksHandler)
 	mux.HandleFunc("GET /api/tracks/{id}", s.trackHandler)
 	mux.HandleFunc("GET /api/tracks/{id}/stream", s.streamHandler)
@@ -271,6 +276,46 @@ func (s *Server) healthHandler(w http.ResponseWriter, r *http.Request) {
 		"status": "ok",
 		"time":   time.Now().UTC(),
 	})
+}
+
+func (s *Server) feedbackHandler(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Type     string `json:"type"`
+		Message  string `json:"message"`
+		Rating   int    `json:"rating"`
+		Metadata string `json:"metadata"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	if body.Message == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "message required"})
+		return
+	}
+	if body.Type == "" {
+		body.Type = "general"
+	}
+	var userID *int64
+	if u := userFromContext(r.Context()); u != nil {
+		userID = &u.ID
+	}
+	id, err := s.db.InsertFeedback(userID, body.Type, body.Message, body.Rating, body.Metadata)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]interface{}{"id": id, "status": "received"})
+}
+
+func (s *Server) crashesHandler(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if s.crashReporter == nil {
+		writeJSON(w, http.StatusOK, []crashreport.Report{})
+		return
+	}
+	reports := s.crashReporter.Reports(limit)
+	writeJSON(w, http.StatusOK, reports)
 }
 
 func (s *Server) tracksHandler(w http.ResponseWriter, r *http.Request) {

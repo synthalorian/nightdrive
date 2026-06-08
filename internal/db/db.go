@@ -214,10 +214,28 @@ CREATE TABLE IF NOT EXISTS gapless_reports (
 CREATE INDEX IF NOT EXISTS idx_playback_sessions_token ON playback_sessions(token);
 CREATE INDEX IF NOT EXISTS idx_playback_queue_session ON playback_queue(session_id);
 CREATE INDEX IF NOT EXISTS idx_sync_rooms_token ON sync_rooms(token);
-CREATE INDEX IF NOT EXISTS idx_cast_devices_type ON cast_devices(type);
-`
+	CREATE INDEX IF NOT EXISTS idx_cast_devices_type ON cast_devices(type);
+	`
 	if _, err := d.Exec(v06Schema); err != nil {
 		return fmt.Errorf("migrate v0.6.0: %w", err)
+	}
+
+	// v0.8.0: Feedback and crash reporting schema
+	v08Schema := `
+	CREATE TABLE IF NOT EXISTS feedback (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+		type TEXT NOT NULL DEFAULT 'general',
+		message TEXT NOT NULL,
+		rating INTEGER DEFAULT 0,
+		metadata TEXT,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_feedback_type ON feedback(type);
+	CREATE INDEX IF NOT EXISTS idx_feedback_created ON feedback(created_at);
+	`
+	if _, err := d.Exec(v08Schema); err != nil {
+		return fmt.Errorf("migrate v0.8.0: %w", err)
 	}
 	return nil
 }

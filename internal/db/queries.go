@@ -1149,3 +1149,48 @@ func (d *DB) DeleteSyncRoom(id int64) error {
 	return err
 }
 
+func (d *DB) InsertFeedback(userID *int64, fbType, message string, rating int, metadata string) (int64, error) {
+	var uid interface{}
+	if userID != nil {
+		uid = *userID
+	}
+	res, err := d.Exec(
+		`INSERT INTO feedback(user_id, type, message, rating, metadata) VALUES (?,?,?,?,?)`,
+		uid, fbType, message, rating, metadata,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+func (d *DB) Feedback(limit int) ([]Feedback, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 50
+	}
+	rows, err := d.Query(
+		`SELECT id, user_id, type, message, rating, metadata, created_at FROM feedback ORDER BY created_at DESC LIMIT ?`, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Feedback
+	for rows.Next() {
+		var f Feedback
+		var userID sql.NullInt64
+		var metadata sql.NullString
+		if err := rows.Scan(&f.ID, &userID, &f.Type, &f.Message, &f.Rating, &metadata, &f.CreatedAt); err != nil {
+			return nil, err
+		}
+		if userID.Valid {
+			f.UserID = &userID.Int64
+		}
+		if metadata.Valid {
+			f.Metadata = metadata.String
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
