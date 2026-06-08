@@ -11,7 +11,10 @@ import (
 
 	"nightdrive/internal/api"
 	"nightdrive/internal/config"
+	"nightdrive/internal/crashreport"
 	"nightdrive/internal/db"
+	"nightdrive/internal/logging"
+	"nightdrive/internal/recovery"
 	"nightdrive/internal/scanner"
 	"nightdrive/internal/web"
 )
@@ -21,33 +24,48 @@ func main() {
 	flag.StringVar(&cfgPath, "config", "nightdrive.toml", "path to config file")
 	flag.Parse()
 
+	logger, err := logging.NewFileLogger("data/logs", "nightdrive", logging.InfoLevel, 10<<20)
+	if err != nil {
+		log.Printf("[warn] structured logging init failed: %v; falling back to stderr", err)
+		logger = logging.New(os.Stderr, logging.InfoLevel)
+	}
+	log.SetOutput(logger.GoStdlibAdapter().Writer())
+
+	migrator := config.NewMigrator()
+	_, startVersion, err := migrator.MigrateFile(cfgPath)
+	if err != nil && !os.IsNotExist(err) {
+		logger.Warn("config migration failed", map[string]interface{}{"error": err.Error()})
+	} else if startVersion > 0 {
+		logger.Info("config migrated", map[string]interface{}{"from_version": startVersion})
+	}
+
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
-		log.Printf("[warn] config load: %v; using defaults", err)
+		logger.Warn("config load failed; using defaults", map[string]interface{}{"error": err.Error()})
 		cfg = config.Default()
 	}
 
 	if err := os.MkdirAll(filepath.Dir(cfg.Database), 0o755); err != nil {
-		log.Fatalf("mkdir data: %v", err)
+		logger.Fatal("mkdir data", map[string]interface{}{"error": err.Error()})
 	}
 
 	database, err := db.Open(cfg.Database)
 	if err != nil {
-		log.Fatalf("open db: %v", err)
+		logger.Fatal("open db", map[string]interface{}{"error": err.Error()})
 	}
 	defer database.Close()
 
 	if err := database.Migrate(); err != nil {
-		log.Fatalf("migrate db: %v", err)
+		logger.Fatal("migrate db", map[string]interface{}{"error": err.Error()})
 	}
 
 	users, _ := database.Users()
 	if len(users) == 0 {
 		hash, _ := bcrypt.GenerateFromPassword([]byte("admin"), bcrypt.DefaultCost)
 		if _, err := database.InsertUser("admin", string(hash), "admin"); err != nil {
-			log.Printf("[warn] create default admin: %v", err)
+			logger.Warn("create default admin", map[string]interface{}{"error": err.Error()})
 		} else {
-			log.Println("[nightdrive] created default admin user (admin / admin)")
+			logger.Info("created default admin user (admin / admin)")
 		}
 	}
 
@@ -58,20 +76,28 @@ func main() {
 				continue
 			}
 			if err := scan.AddRoot(d); err != nil {
-				log.Printf("[warn] add root %s: %v", d, err)
+				logger.Warn("add root", map[string]interface{}{"root": d, "error": err.Error()})
 			}
 		}
 		go scan.Run()
 	}
 
-	srv := api.NewServer(cfg, database, scan)
+	recMgr := recovery.NewManager("data/crashes")
+	crashReporter := crashreport.NewReporter()
+	_ = crashReporter.ScanCrashDumps("data/crashes")
+	recMgr.SetOnRecovered(crashReporter.ObserveRecovery)
+
+	srv := api.NewServer(cfg, database, scan, crashReporter)
 	mux := http.NewServeMux()
+
 	srv.Register(mux)
 	web.Register(mux)
 
+	handler := recMgr.Middleware(mux)
+
 	addr := cfg.Listen
-	log.Printf("[nightdrive] listening on http://%s", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
-		log.Fatalf("serve: %v", err)
+	logger.Info("listening", map[string]interface{}{"addr": addr})
+	if err := http.ListenAndServe(addr, handler); err != nil {
+		logger.Fatal("serve", map[string]interface{}{"error": err.Error()})
 	}
 }

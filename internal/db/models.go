@@ -89,3 +89,13 @@ type ArtistCount struct {
 	Artist Artist `json:"artist"`
 	Count  int    `json:"count"`
 }
+
+type Feedback struct {
+	ID        int64     `json:"id"`
+	UserID    *int64    `json:"userId,omitempty"`
+	Type      string    `json:"type"`
+	Message   string    `json:"message"`
+	Rating    int       `json:"rating"`
+	Metadata  string    `json:"metadata,omitempty"`
+	CreatedAt time.Time `json:"createdAt"`
+}
