@@ -20,7 +20,7 @@ func setupBenchmarkServer(b *testing.B) (*Server, *db.DB) {
 
 	cfg := config.Default()
 	scan := scanner.New(cfg, database)
-	srv := NewServer(cfg, database, scan)
+	srv := NewServer(cfg, database, scan, nil)
 
 	// Insert test data
 	artistID, _ := database.InsertArtist("Artist")
