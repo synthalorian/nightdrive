@@ -18,11 +18,13 @@ type SubsonicResponse struct {
 	Xmlns      string      `xml:"xmlns,attr" json:"-"`
 	Status     string      `xml:"status,attr" json:"status"`
 	Version    string      `xml:"version,attr" json:"version"`
-	AlbumList  *AlbumList  `xml:"albumList" json:"albumList,omitempty"`
-	Starred    *Starred    `xml:"starred" json:"starred,omitempty"`
-	Playlists  *Playlists  `xml:"playlists" json:"playlists,omitempty"`
-	License    *License    `xml:"license" json:"license,omitempty"`
-	Error      *SubError   `xml:"error" json:"error,omitempty"`
+	AlbumList  *AlbumList      `xml:"albumList" json:"albumList,omitempty"`
+	Starred    *Starred        `xml:"starred" json:"starred,omitempty"`
+	Playlists  *Playlists      `xml:"playlists" json:"playlists,omitempty"`
+	License    *License        `xml:"license" json:"license,omitempty"`
+	Lyrics     *SubsonicLyrics `xml:"lyrics" json:"lyrics,omitempty"`
+	Playlist   *SubsonicPlaylist `xml:"playlist" json:"playlist,omitempty"`
+	Error      *SubError       `xml:"error" json:"error,omitempty"`
 }
 
 // AlbumList holds a list of albums
@@ -82,6 +84,12 @@ type SubsonicPlaylist struct {
 // License holds license info
 type License struct {
 	Valid bool `xml:"valid,attr" json:"valid"`
+}
+
+type SubsonicLyrics struct {
+	Artist string `xml:"artist,attr" json:"artist"`
+	Title  string `xml:"title,attr" json:"title"`
+	Value  string `xml:",chardata" json:"value"`
 }
 
 // SubError represents a Subsonic error
@@ -167,6 +175,16 @@ func handleSubsonic(w http.ResponseWriter, r *http.Request) {
 		handleGetStarred(w, r)
 	case "getPlaylists":
 		handleGetPlaylists(w, r)
+	case "getPlaylist":
+		handleGetPlaylist(w, r)
+	case "createPlaylist":
+		handleCreatePlaylist(w, r)
+	case "updatePlaylist":
+		handleUpdatePlaylist(w, r)
+	case "deletePlaylist":
+		handleDeletePlaylist(w, r)
+	case "getLyrics":
+		handleGetLyrics(w, r)
 	case "scrobble":
 		handleScrobble(w, r)
 	default:
@@ -242,8 +260,6 @@ func handleGetStarred(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Return empty lists (no starring implemented yet in scanner)
-	// Could be expanded to query stars table
 	_ = user
 	starred := &Starred{
 		Artists: []SubsonicArtist{},
@@ -268,24 +284,238 @@ func handleGetPlaylists(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	playlists, err := db.GetAllPlaylists(0) // Get all playlists for Subsonic compat
+	playlists, err := db.GetAllPlaylists(0)
 	if err != nil {
 		writeSubsonicError(w, r, 0, fmt.Sprintf("Failed to get playlists: %v", err))
 		return
 	}
 
-	subPlaylists := make([]SubsonicPlaylist, len(playlists))
-	for i, p := range playlists {
-		subPlaylists[i] = SubsonicPlaylist{
+	smartPlaylists, err := db.GetAllSmartPlaylists(0)
+	if err != nil {
+		writeSubsonicError(w, r, 0, fmt.Sprintf("Failed to get smart playlists: %v", err))
+		return
+	}
+
+	totalCount := len(playlists) + len(smartPlaylists)
+	subPlaylists := make([]SubsonicPlaylist, 0, totalCount)
+
+	for _, p := range playlists {
+		tracks, _ := db.GetPlaylistTracks(p.ID)
+		subPlaylists = append(subPlaylists, SubsonicPlaylist{
 			ID:        strconv.FormatInt(p.ID, 10),
 			Name:      p.Name,
-			SongCount: 0,
+			SongCount: len(tracks),
 			Created:   p.CreatedAt.Format(time.RFC3339),
-		}
+		})
+	}
+
+	for _, sp := range smartPlaylists {
+		tracks, _ := db.GetSmartPlaylistTracks(sp)
+		subPlaylists = append(subPlaylists, SubsonicPlaylist{
+			ID:        "sp_" + strconv.FormatInt(sp.ID, 10),
+			Name:      sp.Name + " (Smart)",
+			SongCount: len(tracks),
+			Created:   sp.CreatedAt.Format(time.RFC3339),
+		})
 	}
 
 	writeSubsonicResponse(w, r, &SubsonicResponse{
 		Playlists: &Playlists{Playlist: subPlaylists},
+	})
+}
+
+func handleGetPlaylist(w http.ResponseWriter, r *http.Request) {
+	apiKey := r.URL.Query().Get("p")
+	if apiKey == "" {
+		writeSubsonicError(w, r, 10, "Required parameter is missing: p")
+		return
+	}
+	_, err := db.GetUserByAPIKey(apiKey)
+	if err != nil {
+		writeSubsonicError(w, r, 40, "Wrong username or password")
+		return
+	}
+
+	idStr := r.URL.Query().Get("id")
+	if idStr == "" {
+		writeSubsonicError(w, r, 10, "Required parameter is missing: id")
+		return
+	}
+
+	playlistID, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		writeSubsonicError(w, r, 70, "Invalid id")
+		return
+	}
+
+	playlist, err := db.GetPlaylistByID(playlistID)
+	if err != nil {
+		writeSubsonicError(w, r, 70, "Playlist not found")
+		return
+	}
+
+	tracks, err := db.GetPlaylistTracks(playlistID)
+	if err != nil {
+		writeSubsonicError(w, r, 0, fmt.Sprintf("Failed to get tracks: %v", err))
+		return
+	}
+
+	entries := make([]SubsonicTrack, len(tracks))
+	for i, pt := range tracks {
+		entries[i] = SubsonicTrack{
+			ID:       strconv.FormatInt(pt.Track.ID, 10),
+			Parent:   strconv.FormatInt(pt.Track.AlbumID, 10),
+			Title:    pt.Track.Title,
+			Track:    pt.Track.TrackNum,
+			Duration: pt.Track.Duration,
+			Format:   strings.ToLower(pt.Track.Format),
+		}
+	}
+
+	writeSubsonicResponse(w, r, &SubsonicResponse{
+		Playlist: &SubsonicPlaylist{
+			ID:        strconv.FormatInt(playlist.ID, 10),
+			Name:      playlist.Name,
+			SongCount: len(entries),
+			Created:   playlist.CreatedAt.Format(time.RFC3339),
+			Entry:     entries,
+		},
+	})
+}
+
+func handleCreatePlaylist(w http.ResponseWriter, r *http.Request) {
+	apiKey := r.URL.Query().Get("p")
+	if apiKey == "" {
+		writeSubsonicError(w, r, 10, "Required parameter is missing: p")
+		return
+	}
+	user, err := db.GetUserByAPIKey(apiKey)
+	if err != nil {
+		writeSubsonicError(w, r, 40, "Wrong username or password")
+		return
+	}
+
+	name := r.URL.Query().Get("name")
+	if name == "" {
+		writeSubsonicError(w, r, 10, "Required parameter is missing: name")
+		return
+	}
+
+	playlist, err := db.CreatePlaylist(user.ID, name)
+	if err != nil {
+		writeSubsonicError(w, r, 0, fmt.Sprintf("Failed to create playlist: %v", err))
+		return
+	}
+
+	writeSubsonicResponse(w, r, &SubsonicResponse{
+		Playlist: &SubsonicPlaylist{
+			ID:        strconv.FormatInt(playlist.ID, 10),
+			Name:      playlist.Name,
+			SongCount: 0,
+			Created:   playlist.CreatedAt.Format(time.RFC3339),
+		},
+	})
+}
+
+func handleUpdatePlaylist(w http.ResponseWriter, r *http.Request) {
+	apiKey := r.URL.Query().Get("p")
+	if apiKey == "" {
+		writeSubsonicError(w, r, 10, "Required parameter is missing: p")
+		return
+	}
+	_, err := db.GetUserByAPIKey(apiKey)
+	if err != nil {
+		writeSubsonicError(w, r, 40, "Wrong username or password")
+		return
+	}
+
+	playlistID, err := strconv.ParseInt(r.URL.Query().Get("playlistId"), 10, 64)
+	if err != nil {
+		writeSubsonicError(w, r, 70, "Invalid playlistId")
+		return
+	}
+
+	name := r.URL.Query().Get("name")
+	if name != "" {
+		_, err = db.UpdatePlaylist(playlistID, name)
+		if err != nil {
+			writeSubsonicError(w, r, 0, fmt.Sprintf("Failed to update playlist: %v", err))
+			return
+		}
+	}
+
+	songIds := r.URL.Query()["songId"]
+	for _, songId := range songIds {
+		trackID, err := strconv.ParseInt(songId, 10, 64)
+		if err == nil {
+			db.AddTrackToPlaylist(playlistID, trackID)
+		}
+	}
+
+	writeSubsonicResponse(w, r, &SubsonicResponse{})
+}
+
+func handleDeletePlaylist(w http.ResponseWriter, r *http.Request) {
+	apiKey := r.URL.Query().Get("p")
+	if apiKey == "" {
+		writeSubsonicError(w, r, 10, "Required parameter is missing: p")
+		return
+	}
+	_, err := db.GetUserByAPIKey(apiKey)
+	if err != nil {
+		writeSubsonicError(w, r, 40, "Wrong username or password")
+		return
+	}
+
+	playlistID, err := strconv.ParseInt(r.URL.Query().Get("id"), 10, 64)
+	if err != nil {
+		writeSubsonicError(w, r, 70, "Invalid id")
+		return
+	}
+
+	if err := db.DeletePlaylist(playlistID); err != nil {
+		writeSubsonicError(w, r, 0, fmt.Sprintf("Failed to delete playlist: %v", err))
+		return
+	}
+
+	writeSubsonicResponse(w, r, &SubsonicResponse{})
+}
+
+func handleGetLyrics(w http.ResponseWriter, r *http.Request) {
+	apiKey := r.URL.Query().Get("p")
+	if apiKey == "" {
+		writeSubsonicError(w, r, 10, "Required parameter is missing: p")
+		return
+	}
+	_, err := db.GetUserByAPIKey(apiKey)
+	if err != nil {
+		writeSubsonicError(w, r, 40, "Wrong username or password")
+		return
+	}
+
+	artist := r.URL.Query().Get("artist")
+	title := r.URL.Query().Get("title")
+
+	var trackID int64
+	err = db.conn.QueryRow(
+		"SELECT t.id FROM tracks t JOIN artists ar ON t.artist_id = ar.id WHERE ar.name = ? AND t.title = ? LIMIT 1",
+		artist, title,
+	).Scan(&trackID)
+
+	var lyricsText string
+	if err == nil {
+		lyrics, err := db.GetLyrics(trackID)
+		if err == nil && lyrics != nil {
+			lyricsText = lyrics.Content
+		}
+	}
+
+	writeSubsonicResponse(w, r, &SubsonicResponse{
+		Lyrics: &SubsonicLyrics{
+			Artist: artist,
+			Title:  title,
+			Value:  lyricsText,
+		},
 	})
 }
 

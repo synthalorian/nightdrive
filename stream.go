@@ -55,6 +55,20 @@ func (sh *StreamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	apiKey := r.Header.Get("X-API-Key")
+	if apiKey == "" {
+		apiKey = r.URL.Query().Get("api_key")
+	}
+	if apiKey != "" {
+		if user, err := db.GetUserByAPIKey(apiKey); err == nil {
+			db.RecordScrobble(user.ID, track.ID)
+			db.IncrementPlayCount(track.ID)
+			if scrobbler != nil {
+				scrobbler.Scrobble(user.ID, track.ID)
+			}
+		}
+	}
+
 	// Expand home directory in path
 	path := track.Path
 	if strings.HasPrefix(path, "~/") {

@@ -73,10 +73,15 @@ type PlaylistTrack struct {
 
 // User represents a system user
 type User struct {
-	ID        int64     `json:"id"`
-	Username  string    `json:"username"`
-	APIKey    string    `json:"api_key"`
-	CreatedAt time.Time `json:"created_at"`
+	ID               int64     `json:"id"`
+	Username         string    `json:"username"`
+	APIKey           string    `json:"api_key"`
+	LastFMUsername   string    `json:"lastfm_username"`
+	LastFMSessionKey string    `json:"lastfm_session_key,omitempty"`
+	LastFMAPIKey     string    `json:"lastfm_api_key,omitempty"`
+	QuotaBytes       int64     `json:"quota_bytes"`
+	QuotaUsedBytes   int64     `json:"quota_used_bytes"`
+	CreatedAt        time.Time `json:"created_at"`
 }
 
 // Star represents a starred item
@@ -86,6 +91,27 @@ type Star struct {
 	ItemID    int64     `json:"item_id"`
 	ItemType  string    `json:"item_type"`
 	CreatedAt time.Time `json:"created_at"`
+}
+
+// SmartPlaylist represents a rules-based auto-updating playlist
+type SmartPlaylist struct {
+	ID        int64     `json:"id"`
+	UserID    int64     `json:"user_id"`
+	Name      string    `json:"name"`
+	RuleType  string    `json:"rule_type"`  // recently_added, most_played, genre, year, random
+	RuleValue string    `json:"rule_value"` // e.g. "Rock", "2020", ""
+	LimitNum  int       `json:"limit_num"`  // max tracks
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// Lyrics represents track lyrics
+type Lyrics struct {
+	TrackID   int64     `json:"track_id"`
+	Content   string    `json:"content"`
+	Synced    bool      `json:"synced"`
+	Source    string    `json:"source"` // embedded, lrclib
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // NewDB creates a new database connection and initializes the schema
@@ -216,6 +242,56 @@ func (db *DB) initSchema() error {
 	// Migrate: add user_id to playlists if not exists
 	if _, err := db.conn.Exec(`ALTER TABLE playlists ADD COLUMN user_id INTEGER NOT NULL DEFAULT 0`); err != nil {
 		// Column likely already exists, ignore error
+	}
+
+	// Migrate: add lyrics table
+	if _, err := db.conn.Exec(`
+		CREATE TABLE IF NOT EXISTS lyrics (
+			track_id INTEGER PRIMARY KEY,
+			content TEXT,
+			synced INTEGER DEFAULT 0,
+			source TEXT DEFAULT '',
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE CASCADE
+		)`); err != nil {
+		return err
+	}
+
+	// Migrate: add play_count to tracks
+	if _, err := db.conn.Exec(`ALTER TABLE tracks ADD COLUMN play_count INTEGER DEFAULT 0`); err != nil {
+		// Column likely already exists, ignore error
+	}
+
+	// Migrate: add smart_playlists table
+	if _, err := db.conn.Exec(`
+		CREATE TABLE IF NOT EXISTS smart_playlists (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id INTEGER NOT NULL DEFAULT 0,
+			name TEXT NOT NULL,
+			rule_type TEXT NOT NULL DEFAULT 'random',
+			rule_value TEXT DEFAULT '',
+			limit_num INTEGER DEFAULT 50,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)`); err != nil {
+		return err
+	}
+
+	// Migrate: add lastfm and quota fields to users
+	if _, err := db.conn.Exec(`ALTER TABLE users ADD COLUMN lastfm_username TEXT DEFAULT ''`); err != nil {
+		// ignore
+	}
+	if _, err := db.conn.Exec(`ALTER TABLE users ADD COLUMN lastfm_session_key TEXT DEFAULT ''`); err != nil {
+		// ignore
+	}
+	if _, err := db.conn.Exec(`ALTER TABLE users ADD COLUMN lastfm_api_key TEXT DEFAULT ''`); err != nil {
+		// ignore
+	}
+	if _, err := db.conn.Exec(`ALTER TABLE users ADD COLUMN quota_bytes INTEGER DEFAULT 0`); err != nil {
+		// ignore
+	}
+	if _, err := db.conn.Exec(`ALTER TABLE users ADD COLUMN quota_used_bytes INTEGER DEFAULT 0`); err != nil {
+		// ignore
 	}
 
 	return nil
@@ -568,6 +644,15 @@ func (db *DB) RemoveTrackFromPlaylist(playlistID, trackID int64) error {
 	return err
 }
 
+// ReorderPlaylistTrack updates the position of a track in a playlist
+func (db *DB) ReorderPlaylistTrack(playlistID, trackID int64, newPosition int) error {
+	_, err := db.conn.Exec(
+		"UPDATE playlist_tracks SET position = ? WHERE playlist_id = ? AND track_id = ?",
+		newPosition, playlistID, trackID,
+	)
+	return err
+}
+
 // GetPlaylistTracks returns all tracks in a playlist
 func (db *DB) GetPlaylistTracks(playlistID int64) ([]*PlaylistTrack, error) {
 	rows, err := db.conn.Query(
@@ -621,6 +706,9 @@ func (db *DB) GetStats() (map[string]int64, error) {
 	if err := db.conn.QueryRow("SELECT COUNT(*) FROM playlists").Scan(&count); err == nil {
 		stats["playlists"] = count
 	}
+	if err := db.conn.QueryRow("SELECT COUNT(*) FROM smart_playlists").Scan(&count); err == nil {
+		stats["smart_playlists"] = count
+	}
 
 	return stats, nil
 }
@@ -640,8 +728,9 @@ func (db *DB) CreateUser(username, apiKey string) (*User, error) {
 // GetUserByID retrieves a user by ID
 func (db *DB) GetUserByID(id int64) (*User, error) {
 	var u User
-	err := db.conn.QueryRow("SELECT id, username, api_key, created_at FROM users WHERE id = ?", id).Scan(
-		&u.ID, &u.Username, &u.APIKey, &u.CreatedAt)
+	err := db.conn.QueryRow(
+		"SELECT id, username, api_key, lastfm_username, lastfm_session_key, lastfm_api_key, quota_bytes, quota_used_bytes, created_at FROM users WHERE id = ?", id).Scan(
+		&u.ID, &u.Username, &u.APIKey, &u.LastFMUsername, &u.LastFMSessionKey, &u.LastFMAPIKey, &u.QuotaBytes, &u.QuotaUsedBytes, &u.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -651,8 +740,9 @@ func (db *DB) GetUserByID(id int64) (*User, error) {
 // GetUserByAPIKey retrieves a user by API key
 func (db *DB) GetUserByAPIKey(apiKey string) (*User, error) {
 	var u User
-	err := db.conn.QueryRow("SELECT id, username, api_key, created_at FROM users WHERE api_key = ?", apiKey).Scan(
-		&u.ID, &u.Username, &u.APIKey, &u.CreatedAt)
+	err := db.conn.QueryRow(
+		"SELECT id, username, api_key, lastfm_username, lastfm_session_key, lastfm_api_key, quota_bytes, quota_used_bytes, created_at FROM users WHERE api_key = ?", apiKey).Scan(
+		&u.ID, &u.Username, &u.APIKey, &u.LastFMUsername, &u.LastFMSessionKey, &u.LastFMAPIKey, &u.QuotaBytes, &u.QuotaUsedBytes, &u.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -662,8 +752,9 @@ func (db *DB) GetUserByAPIKey(apiKey string) (*User, error) {
 // GetUserByUsername retrieves a user by username
 func (db *DB) GetUserByUsername(username string) (*User, error) {
 	var u User
-	err := db.conn.QueryRow("SELECT id, username, api_key, created_at FROM users WHERE username = ?", username).Scan(
-		&u.ID, &u.Username, &u.APIKey, &u.CreatedAt)
+	err := db.conn.QueryRow(
+		"SELECT id, username, api_key, lastfm_username, lastfm_session_key, lastfm_api_key, quota_bytes, quota_used_bytes, created_at FROM users WHERE username = ?", username).Scan(
+		&u.ID, &u.Username, &u.APIKey, &u.LastFMUsername, &u.LastFMSessionKey, &u.LastFMAPIKey, &u.QuotaBytes, &u.QuotaUsedBytes, &u.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -754,6 +845,195 @@ func (db *DB) RecordScrobble(userID, trackID int64) error {
 	_, err := db.conn.Exec(
 		"INSERT INTO play_history (user_id, track_id) VALUES (?, ?)",
 		userID, trackID,
+	)
+	return err
+}
+
+// GetLyrics retrieves lyrics for a track
+func (db *DB) GetLyrics(trackID int64) (*Lyrics, error) {
+	var l Lyrics
+	err := db.conn.QueryRow(
+		"SELECT track_id, content, synced, source, updated_at FROM lyrics WHERE track_id = ?",
+		trackID,
+	).Scan(&l.TrackID, &l.Content, &l.Synced, &l.Source, &l.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &l, nil
+}
+
+// SaveLyrics saves or updates lyrics for a track
+func (db *DB) SaveLyrics(trackID int64, content, source string, synced bool) error {
+	_, err := db.conn.Exec(
+		`INSERT INTO lyrics (track_id, content, source, synced, updated_at)
+		 VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+		 ON CONFLICT(track_id) DO UPDATE SET
+			content=excluded.content,
+			source=excluded.source,
+			synced=excluded.synced,
+			updated_at=CURRENT_TIMESTAMP`,
+		trackID, content, source, synced,
+	)
+	return err
+}
+
+// IncrementPlayCount increments the play count for a track
+func (db *DB) IncrementPlayCount(trackID int64) error {
+	_, err := db.conn.Exec(
+		"UPDATE tracks SET play_count = play_count + 1 WHERE id = ?",
+		trackID,
+	)
+	return err
+}
+
+// CreateSmartPlaylist creates a new smart playlist
+func (db *DB) CreateSmartPlaylist(userID int64, name, ruleType, ruleValue string, limitNum int) (*SmartPlaylist, error) {
+	res, err := db.conn.Exec(
+		"INSERT INTO smart_playlists (user_id, name, rule_type, rule_value, limit_num) VALUES (?, ?, ?, ?, ?)",
+		userID, name, ruleType, ruleValue, limitNum,
+	)
+	if err != nil {
+		return nil, err
+	}
+	id, _ := res.LastInsertId()
+	return db.GetSmartPlaylistByID(id)
+}
+
+// GetSmartPlaylistByID retrieves a smart playlist by ID
+func (db *DB) GetSmartPlaylistByID(id int64) (*SmartPlaylist, error) {
+	var sp SmartPlaylist
+	err := db.conn.QueryRow(
+		"SELECT id, user_id, name, rule_type, rule_value, limit_num, created_at, updated_at FROM smart_playlists WHERE id = ?",
+		id,
+	).Scan(&sp.ID, &sp.UserID, &sp.Name, &sp.RuleType, &sp.RuleValue, &sp.LimitNum, &sp.CreatedAt, &sp.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &sp, nil
+}
+
+// GetAllSmartPlaylists returns all smart playlists for a user (or all if userID == 0)
+func (db *DB) GetAllSmartPlaylists(userID int64) ([]*SmartPlaylist, error) {
+	var rows *sql.Rows
+	var err error
+	if userID > 0 {
+		rows, err = db.conn.Query("SELECT id, user_id, name, rule_type, rule_value, limit_num, created_at, updated_at FROM smart_playlists WHERE user_id = ? ORDER BY name", userID)
+	} else {
+		rows, err = db.conn.Query("SELECT id, user_id, name, rule_type, rule_value, limit_num, created_at, updated_at FROM smart_playlists ORDER BY name")
+	}
+	if err != nil {
+		return []*SmartPlaylist{}, err
+	}
+	defer rows.Close()
+
+	var playlists []*SmartPlaylist
+	for rows.Next() {
+		var sp SmartPlaylist
+		if err := rows.Scan(&sp.ID, &sp.UserID, &sp.Name, &sp.RuleType, &sp.RuleValue, &sp.LimitNum, &sp.CreatedAt, &sp.UpdatedAt); err != nil {
+			return []*SmartPlaylist{}, err
+		}
+		playlists = append(playlists, &sp)
+	}
+	if playlists == nil {
+		playlists = []*SmartPlaylist{}
+	}
+	return playlists, rows.Err()
+}
+
+// UpdateSmartPlaylist updates a smart playlist
+func (db *DB) UpdateSmartPlaylist(id int64, name, ruleType, ruleValue string, limitNum int) (*SmartPlaylist, error) {
+	_, err := db.conn.Exec(
+		"UPDATE smart_playlists SET name = ?, rule_type = ?, rule_value = ?, limit_num = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+		name, ruleType, ruleValue, limitNum, id,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return db.GetSmartPlaylistByID(id)
+}
+
+// DeleteSmartPlaylist deletes a smart playlist
+func (db *DB) DeleteSmartPlaylist(id int64) error {
+	_, err := db.conn.Exec("DELETE FROM smart_playlists WHERE id = ?", id)
+	return err
+}
+
+// GetSmartPlaylistTracks returns tracks matching a smart playlist's rules
+func (db *DB) GetSmartPlaylistTracks(sp *SmartPlaylist) ([]*Track, error) {
+	var query string
+	var args []interface{}
+
+	limit := sp.LimitNum
+	if limit <= 0 {
+		limit = 50
+	}
+
+	switch sp.RuleType {
+	case "recently_added":
+		query = "SELECT id, album_id, artist_id, title, path, track_num, duration, format, bitrate, created_at FROM tracks ORDER BY created_at DESC LIMIT ?"
+		args = append(args, limit)
+	case "most_played":
+		query = "SELECT id, album_id, artist_id, title, path, track_num, duration, format, bitrate, created_at FROM tracks ORDER BY play_count DESC, title LIMIT ?"
+		args = append(args, limit)
+	case "genre":
+		query = "SELECT id, album_id, artist_id, title, path, track_num, duration, format, bitrate, created_at FROM tracks WHERE title LIKE ? ORDER BY RANDOM() LIMIT ?"
+		args = append(args, "%"+sp.RuleValue+"%", limit)
+	case "year":
+		query = `SELECT t.id, t.album_id, t.artist_id, t.title, t.path, t.track_num, t.duration, t.format, t.bitrate, t.created_at
+				 FROM tracks t
+				 JOIN albums a ON t.album_id = a.id
+				 WHERE a.year = ?
+				 ORDER BY t.title LIMIT ?`
+		args = append(args, sp.RuleValue, limit)
+	default:
+		query = "SELECT id, album_id, artist_id, title, path, track_num, duration, format, bitrate, created_at FROM tracks ORDER BY RANDOM() LIMIT ?"
+		args = append(args, limit)
+	}
+
+	rows, err := db.conn.Query(query, args...)
+	if err != nil {
+		return []*Track{}, err
+	}
+	defer rows.Close()
+
+	var tracks []*Track
+	for rows.Next() {
+		var t Track
+		if err := rows.Scan(&t.ID, &t.AlbumID, &t.ArtistID, &t.Title, &t.Path,
+			&t.TrackNum, &t.Duration, &t.Format, &t.Bitrate, &t.CreatedAt); err != nil {
+			return []*Track{}, err
+		}
+		tracks = append(tracks, &t)
+	}
+	if tracks == nil {
+		tracks = []*Track{}
+	}
+	return tracks, rows.Err()
+}
+
+// UpdateUserLastFM updates a user's Last.fm credentials
+func (db *DB) UpdateUserLastFM(userID int64, username, sessionKey string) error {
+	_, err := db.conn.Exec(
+		"UPDATE users SET lastfm_username = ?, lastfm_session_key = ? WHERE id = ?",
+		username, sessionKey, userID,
+	)
+	return err
+}
+
+// UpdateUserQuota updates a user's storage quota
+func (db *DB) UpdateUserQuota(userID int64, quotaBytes int64) error {
+	_, err := db.conn.Exec(
+		"UPDATE users SET quota_bytes = ? WHERE id = ?",
+		quotaBytes, userID,
+	)
+	return err
+}
+
+// UpdateUserQuotaUsed updates a user's used storage quota
+func (db *DB) UpdateUserQuotaUsed(userID int64, usedBytes int64) error {
+	_, err := db.conn.Exec(
+		"UPDATE users SET quota_used_bytes = ? WHERE id = ?",
+		usedBytes, userID,
 	)
 	return err
 }

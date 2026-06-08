@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  nightdrive:
+    build: .
+    container_name: nightdrive
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./music:/music:ro
+      - ./data:/data
+    environment:
+      - NIGHTDRIVE_MUSIC=/music
+      - PORT=8080
+    restart: unless-stopped
