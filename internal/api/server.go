@@ -17,21 +17,76 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
+	"nightdrive/internal/cast"
 	"nightdrive/internal/config"
 	"nightdrive/internal/db"
+	"nightdrive/internal/dsp"
+	"nightdrive/internal/gapless"
+	"nightdrive/internal/playback"
 	"nightdrive/internal/scanner"
+	syncpkg "nightdrive/internal/sync"
 )
 
 // Server holds API dependencies.
 type Server struct {
-	cfg     *config.Config
-	db      *db.DB
-	scanner *scanner.Scanner
+	cfg        *config.Config
+	db         *db.DB
+	scanner    *scanner.Scanner
+	playback   *playback.Engine
+	gapless    *gapless.Analyzer
+	castMgr    *cast.Manager
+	syncCoord  *syncpkg.Coordinator
+}
+
+// castStoreAdapter adapts *db.DB to cast.DeviceStore.
+type castStoreAdapter struct{ db *db.DB }
+
+func (a *castStoreAdapter) InsertCastDevice(name, devType, host string, port int, protocol, capabilities string) (int64, error) {
+	return a.db.InsertCastDevice(name, devType, host, port, protocol, capabilities)
+}
+
+func (a *castStoreAdapter) UpdateCastDeviceActivity(id int64, active bool) error {
+	return a.db.UpdateCastDeviceActivity(id, active)
+}
+
+func (a *castStoreAdapter) CastDevices() ([]cast.CastDeviceRecord, error) {
+	devs, err := a.db.CastDevices()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]cast.CastDeviceRecord, len(devs))
+	for i, d := range devs {
+		out[i] = cast.CastDeviceRecord{
+			ID:           d.ID,
+			Name:         d.Name,
+			Type:         d.Type,
+			Host:         d.Host,
+			Port:         d.Port,
+			Protocol:     d.Protocol,
+			Capabilities: d.Capabilities,
+			IsActive:     d.IsActive,
+			LastSeen:     d.LastSeen,
+		}
+	}
+	return out, nil
+}
+
+func (a *castStoreAdapter) DeleteCastDevice(id int64) error {
+	return a.db.DeleteCastDevice(id)
 }
 
 // NewServer creates an API server.
 func NewServer(cfg *config.Config, database *db.DB, s *scanner.Scanner) *Server {
-	return &Server{cfg: cfg, db: database, scanner: s}
+	eng := playback.NewEngine(database)
+	return &Server{
+		cfg:       cfg,
+		db:        database,
+		scanner:   s,
+		playback:  eng,
+		gapless:   gapless.NewAnalyzer(database),
+		castMgr:   cast.NewManager(&castStoreAdapter{db: database}),
+		syncCoord: syncpkg.NewCoordinator(database, eng),
+	}
 }
 
 type contextKey int
@@ -146,6 +201,48 @@ func (s *Server) Register(mux *http.ServeMux) {
 
 	mux.HandleFunc("GET /api/radio", s.radioHandler)
 	mux.HandleFunc("GET /api/genres", s.genresHandler)
+
+	mux.HandleFunc("POST /api/sessions", s.requireAuth(s.createSessionHandler))
+	mux.HandleFunc("GET /api/sessions", s.requireAuth(s.listSessionsHandler))
+	mux.HandleFunc("GET /api/sessions/{id}", s.requireAuth(s.getSessionHandler))
+	mux.HandleFunc("DELETE /api/sessions/{id}", s.requireAuth(s.deleteSessionHandler))
+	mux.HandleFunc("POST /api/sessions/{id}/play", s.requireAuth(s.sessionPlayHandler))
+	mux.HandleFunc("POST /api/sessions/{id}/pause", s.requireAuth(s.sessionPauseHandler))
+	mux.HandleFunc("POST /api/sessions/{id}/next", s.requireAuth(s.sessionNextHandler))
+	mux.HandleFunc("POST /api/sessions/{id}/prev", s.requireAuth(s.sessionPrevHandler))
+	mux.HandleFunc("POST /api/sessions/{id}/queue", s.requireAuth(s.sessionAddQueueHandler))
+	mux.HandleFunc("GET /api/sessions/{id}/queue", s.requireAuth(s.sessionGetQueueHandler))
+	mux.HandleFunc("DELETE /api/sessions/{id}/queue", s.requireAuth(s.sessionClearQueueHandler))
+	mux.HandleFunc("POST /api/sessions/{id}/volume", s.requireAuth(s.sessionVolumeHandler))
+	mux.HandleFunc("POST /api/sessions/{id}/crossfade", s.requireAuth(s.sessionCrossfadeHandler))
+
+	mux.HandleFunc("POST /api/gapless/analyze/{albumId}", s.requireAuth(s.gaplessAnalyzeHandler))
+	mux.HandleFunc("GET /api/gapless/report/{albumId}", s.gaplessReportHandler)
+	mux.HandleFunc("POST /api/gapless/batch", s.requireAdmin(s.gaplessBatchHandler))
+
+	mux.HandleFunc("GET /api/dsp/presets", s.requireAuth(s.dspPresetsHandler))
+	mux.HandleFunc("POST /api/dsp/presets", s.requireAuth(s.dspCreatePresetHandler))
+	mux.HandleFunc("GET /api/dsp/presets/{id}", s.requireAuth(s.dspPresetHandler))
+	mux.HandleFunc("DELETE /api/dsp/presets/{id}", s.requireAuth(s.dspDeletePresetHandler))
+	mux.HandleFunc("POST /api/dsp/process", s.requireAuth(s.dspProcessHandler))
+
+	mux.HandleFunc("GET /api/sync/rooms", s.authMiddleware(s.listSyncRoomsHandler))
+	mux.HandleFunc("POST /api/sync/rooms", s.requireAuth(s.createSyncRoomHandler))
+	mux.HandleFunc("GET /api/sync/rooms/{id}", s.authMiddleware(s.getSyncRoomHandler))
+	mux.HandleFunc("DELETE /api/sync/rooms/{id}", s.requireAuth(s.deleteSyncRoomHandler))
+	mux.HandleFunc("POST /api/sync/rooms/{id}/join", s.requireAuth(s.joinSyncRoomHandler))
+	mux.HandleFunc("POST /api/sync/rooms/{id}/leave", s.requireAuth(s.leaveSyncRoomHandler))
+	mux.HandleFunc("POST /api/sync/rooms/{id}/play", s.requireAuth(s.syncRoomPlayHandler))
+	mux.HandleFunc("POST /api/sync/rooms/{id}/pause", s.requireAuth(s.syncRoomPauseHandler))
+	mux.HandleFunc("POST /api/sync/rooms/{id}/seek", s.requireAuth(s.syncRoomSeekHandler))
+
+	mux.HandleFunc("GET /api/cast/devices", s.authMiddleware(s.castDevicesHandler))
+	mux.HandleFunc("POST /api/cast/discover", s.requireAuth(s.castDiscoverHandler))
+	mux.HandleFunc("POST /api/cast/devices", s.requireAuth(s.castRegisterHandler))
+	mux.HandleFunc("POST /api/cast/devices/{id}/play", s.requireAuth(s.castPlayHandler))
+	mux.HandleFunc("POST /api/cast/devices/{id}/pause", s.requireAuth(s.castPauseHandler))
+	mux.HandleFunc("POST /api/cast/devices/{id}/stop", s.requireAuth(s.castStopHandler))
+	mux.HandleFunc("DELETE /api/cast/devices/{id}", s.requireAuth(s.castDeleteHandler))
 
 	mux.HandleFunc("GET /rest/ping", s.subsonicHandler(s.subPing))
 	mux.HandleFunc("GET /rest/getLicense", s.subsonicHandler(s.subLicense))
@@ -940,6 +1037,503 @@ func subSong(t db.Track) map[string]interface{} {
 		"isVideo":     false,
 		"created":     time.Now().UTC().Format(time.RFC3339),
 	}
+}
+
+func (s *Server) createSessionHandler(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		DeviceName string `json:"deviceName"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		body.DeviceName = "Unknown Device"
+	}
+	u := userFromContext(r.Context())
+	userID := int64(0)
+	if u != nil {
+		userID = u.ID
+	}
+	token := generateToken()
+	session, err := s.playback.CreateSession(userID, body.DeviceName, token)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusCreated, session)
+}
+
+func (s *Server) listSessionsHandler(w http.ResponseWriter, r *http.Request) {
+	sessions, err := s.db.PlaybackSessions()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, sessions)
+}
+
+func (s *Server) getSessionHandler(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	session, err := s.playback.GetSession(id)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
+		return
+	}
+	writeJSON(w, http.StatusOK, session)
+}
+
+func (s *Server) deleteSessionHandler(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err := s.playback.DeleteSession(id); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusNoContent, nil)
+}
+
+func (s *Server) sessionPlayHandler(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	var body struct {
+		TrackID  int64   `json:"trackId"`
+		Position float64 `json:"position"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	if body.TrackID > 0 {
+		if err := s.playback.SetTrack(id, body.TrackID, body.Position); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+	}
+	if err := s.playback.UpdateState(id, playback.StatePlaying, body.Position); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "playing"})
+}
+
+func (s *Server) sessionPauseHandler(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	var body struct {
+		Position float64 `json:"position"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	if err := s.playback.UpdateState(id, playback.StatePaused, body.Position); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "paused"})
+}
+
+func (s *Server) sessionNextHandler(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	track, err := s.playback.AdvanceTrack(id)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, track)
+}
+
+func (s *Server) sessionPrevHandler(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	track, err := s.playback.PreviousTrack(id)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, track)
+}
+
+func (s *Server) sessionAddQueueHandler(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	var body struct {
+		TrackID int64 `json:"trackId"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	if err := s.playback.AddToQueue(id, body.TrackID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]string{"status": "added"})
+}
+
+func (s *Server) sessionGetQueueHandler(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	queue, err := s.playback.GetQueue(id)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, queue)
+}
+
+func (s *Server) sessionClearQueueHandler(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err := s.playback.ClearQueue(id); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusNoContent, nil)
+}
+
+func (s *Server) sessionVolumeHandler(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	var body struct {
+		Volume float64 `json:"volume"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	if err := s.playback.SetVolume(id, body.Volume); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]float64{"volume": body.Volume})
+}
+
+func (s *Server) sessionCrossfadeHandler(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	var body struct {
+		Enabled     bool    `json:"enabled"`
+		DurationSec float64 `json:"durationSec"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	session, err := s.playback.GetSession(id)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
+		return
+	}
+	session.CrossfadeConfig.Enabled = body.Enabled
+	session.CrossfadeConfig.DurationSec = body.DurationSec
+	writeJSON(w, http.StatusOK, session.CrossfadeConfig)
+}
+
+func (s *Server) gaplessAnalyzeHandler(w http.ResponseWriter, r *http.Request) {
+	albumID, _ := strconv.ParseInt(r.PathValue("albumId"), 10, 64)
+	reports, err := s.gapless.AnalyzeAlbum(albumID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, reports)
+}
+
+func (s *Server) gaplessReportHandler(w http.ResponseWriter, r *http.Request) {
+	albumID, _ := strconv.ParseInt(r.PathValue("albumId"), 10, 64)
+	reports, err := s.gapless.GetAlbumReport(albumID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	verified, issues, _ := s.gapless.VerifyGapless(albumID)
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"verified": verified,
+		"issues":   issues,
+		"reports":  reports,
+	})
+}
+
+func (s *Server) gaplessBatchHandler(w http.ResponseWriter, r *http.Request) {
+	go s.gapless.BatchAnalyze(nil)
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "analyzing"})
+}
+
+func (s *Server) dspPresetsHandler(w http.ResponseWriter, r *http.Request) {
+	u := userFromContext(r.Context())
+	userID := int64(0)
+	if u != nil {
+		userID = u.ID
+	}
+	presets, err := s.db.DSPPresets(userID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, presets)
+}
+
+func (s *Server) dspCreatePresetHandler(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Name                string  `json:"name"`
+		EQLow               float64 `json:"eqLow"`
+		EQMid               float64 `json:"eqMid"`
+		EQHigh              float64 `json:"eqHigh"`
+		CompressorThreshold float64 `json:"compressorThreshold"`
+		CompressorRatio     float64 `json:"compressorRatio"`
+		LoudnessTarget      float64 `json:"loudnessTarget"`
+		IsDefault           bool    `json:"isDefault"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	u := userFromContext(r.Context())
+	userID := int64(0)
+	if u != nil {
+		userID = u.ID
+	}
+	id, err := s.db.InsertDSPPreset(body.Name, userID, body.EQLow, body.EQMid, body.EQHigh, body.CompressorThreshold, body.CompressorRatio, body.LoudnessTarget, body.IsDefault)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]int64{"id": id})
+}
+
+func (s *Server) dspPresetHandler(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	preset, err := s.db.DSPPresetByID(id)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "preset not found"})
+		return
+	}
+	writeJSON(w, http.StatusOK, preset)
+}
+
+func (s *Server) dspDeletePresetHandler(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err := s.db.DeleteDSPPreset(id); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusNoContent, nil)
+}
+
+func (s *Server) dspProcessHandler(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Samples    []float32 `json:"samples"`
+		SampleRate int       `json:"sampleRate"`
+		PresetID   int64     `json:"presetId"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	pipeline := dsp.NewPipeline()
+	if body.PresetID > 0 {
+		preset, err := s.db.DSPPresetByID(body.PresetID)
+		if err == nil {
+			pipeline.ApplyPreset((*dsp.Preset)(preset))
+		}
+	}
+	processed := pipeline.Process(body.Samples, body.SampleRate)
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"samples":  processed,
+		"loudness": dsp.MeasureLoudness(processed),
+	})
+}
+
+func (s *Server) listSyncRoomsHandler(w http.ResponseWriter, r *http.Request) {
+	rooms, err := s.syncCoord.ListRooms()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, rooms)
+}
+
+func (s *Server) createSyncRoomHandler(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name required"})
+		return
+	}
+	u := userFromContext(r.Context())
+	ownerID := int64(0)
+	if u != nil {
+		ownerID = u.ID
+	}
+	token := generateToken()
+	room, err := s.syncCoord.CreateRoom(body.Name, ownerID, token)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusCreated, room)
+}
+
+func (s *Server) getSyncRoomHandler(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	room, err := s.syncCoord.GetRoom(id)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "room not found"})
+		return
+	}
+	writeJSON(w, http.StatusOK, room)
+}
+
+func (s *Server) deleteSyncRoomHandler(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err := s.syncCoord.DeleteRoom(id); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusNoContent, nil)
+}
+
+func (s *Server) joinSyncRoomHandler(w http.ResponseWriter, r *http.Request) {
+	roomID, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	var body struct {
+		SessionID int64 `json:"sessionId"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.SessionID == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "sessionId required"})
+		return
+	}
+	if err := s.syncCoord.JoinRoom(roomID, body.SessionID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "joined"})
+}
+
+func (s *Server) leaveSyncRoomHandler(w http.ResponseWriter, r *http.Request) {
+	roomID, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	var body struct {
+		SessionID int64 `json:"sessionId"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.SessionID == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "sessionId required"})
+		return
+	}
+	if err := s.syncCoord.LeaveRoom(roomID, body.SessionID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "left"})
+}
+
+func (s *Server) syncRoomPlayHandler(w http.ResponseWriter, r *http.Request) {
+	roomID, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	var body struct {
+		TrackID int64 `json:"trackId"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	if err := s.syncCoord.StartRoomPlayback(roomID, body.TrackID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "playing"})
+}
+
+func (s *Server) syncRoomPauseHandler(w http.ResponseWriter, r *http.Request) {
+	roomID, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	var body struct {
+		Position float64 `json:"position"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	if err := s.syncCoord.PauseRoomPlayback(roomID, body.Position); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "paused"})
+}
+
+func (s *Server) syncRoomSeekHandler(w http.ResponseWriter, r *http.Request) {
+	roomID, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	var body struct {
+		Position float64 `json:"position"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "position required"})
+		return
+	}
+	if err := s.syncCoord.SeekRoom(roomID, body.Position); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]float64{"position": body.Position})
+}
+
+func (s *Server) castDevicesHandler(w http.ResponseWriter, r *http.Request) {
+	devices, err := s.castMgr.GetDevices()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, devices)
+}
+
+func (s *Server) castDiscoverHandler(w http.ResponseWriter, r *http.Request) {
+	devices, err := s.castMgr.Discover()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, devices)
+}
+
+func (s *Server) castRegisterHandler(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Name string `json:"name"`
+		Type string `json:"type"`
+		Host string `json:"host"`
+		Port int    `json:"port"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	device, err := s.castMgr.RegisterDevice(body.Name, cast.DeviceType(body.Type), body.Host, body.Port)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusCreated, device)
+}
+
+func (s *Server) castPlayHandler(w http.ResponseWriter, r *http.Request) {
+	deviceID, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	var body struct {
+		StreamURL string  `json:"streamUrl"`
+		Title     string  `json:"title"`
+		Position  float64 `json:"position"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	if err := s.castMgr.CastToDevice(deviceID, body.StreamURL, body.Title, body.Position); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "casting"})
+}
+
+func (s *Server) castPauseHandler(w http.ResponseWriter, r *http.Request) {
+	deviceID, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err := s.castMgr.Pause(deviceID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "paused"})
+}
+
+func (s *Server) castStopHandler(w http.ResponseWriter, r *http.Request) {
+	deviceID, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err := s.castMgr.StopPlayback(deviceID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "stopped"})
+}
+
+func (s *Server) castDeleteHandler(w http.ResponseWriter, r *http.Request) {
+	deviceID, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err := s.castMgr.UnregisterDevice(deviceID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusNoContent, nil)
 }
 
 // Logging middleware wrapper.

@@ -855,3 +855,297 @@ func (d *DB) Genres() ([]string, error) {
 	return out, rows.Err()
 }
 
+type NullInt64 struct {
+	Int64 int64
+	Valid bool
+}
+
+func (n *NullInt64) Scan(value interface{}) error {
+	if value == nil {
+		n.Valid = false
+		return nil
+	}
+	switch v := value.(type) {
+	case int64:
+		n.Int64 = v
+		n.Valid = true
+		return nil
+	default:
+		return fmt.Errorf("cannot scan %T into NullInt64", value)
+	}
+}
+
+type PlaybackSession struct {
+	ID             int64     `json:"id"`
+	UserID         int64     `json:"userId"`
+	Token          string    `json:"token"`
+	DeviceName     string    `json:"deviceName"`
+	CurrentTrackID *int64    `json:"currentTrackId,omitempty"`
+	Position       float64   `json:"position"`
+	State          string    `json:"state"`
+	Volume         float64   `json:"volume"`
+	Shuffle        bool      `json:"shuffle"`
+	RepeatMode     string    `json:"repeatMode"`
+	CreatedAt      time.Time `json:"createdAt"`
+	UpdatedAt      time.Time `json:"updatedAt"`
+}
+
+func (d *DB) PlaybackSessionByToken(token string) (*PlaybackSession, error) {
+	var s PlaybackSession
+	var currentTrackID NullInt64
+	err := d.QueryRow(
+		`SELECT id, user_id, token, device_name, current_track_id, position, state, volume, shuffle, repeat_mode, created_at, updated_at
+		 FROM playback_sessions WHERE token = ?`, token,
+	).Scan(&s.ID, &s.UserID, &s.Token, &s.DeviceName, &currentTrackID, &s.Position, &s.State, &s.Volume, &s.Shuffle, &s.RepeatMode, &s.CreatedAt, &s.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	if currentTrackID.Valid {
+		s.CurrentTrackID = &currentTrackID.Int64
+	}
+	return &s, nil
+}
+
+func (d *DB) PlaybackSessions() ([]PlaybackSession, error) {
+	rows, err := d.Query(
+		`SELECT id, user_id, token, device_name, current_track_id, position, state, volume, shuffle, repeat_mode, created_at, updated_at
+		 FROM playback_sessions ORDER BY updated_at DESC`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var sessions []PlaybackSession
+	for rows.Next() {
+		var s PlaybackSession
+		var currentTrackID NullInt64
+		err := rows.Scan(&s.ID, &s.UserID, &s.Token, &s.DeviceName, &currentTrackID, &s.Position, &s.State, &s.Volume, &s.Shuffle, &s.RepeatMode, &s.CreatedAt, &s.UpdatedAt)
+		if err != nil {
+			return nil, err
+		}
+		if currentTrackID.Valid {
+			s.CurrentTrackID = &currentTrackID.Int64
+		}
+		sessions = append(sessions, s)
+	}
+	return sessions, rows.Err()
+}
+
+func (d *DB) DeletePlaybackSession(id int64) error {
+	_, err := d.Exec(`DELETE FROM playback_sessions WHERE id = ?`, id)
+	return err
+}
+
+type CastDevice struct {
+	ID           int64     `json:"id"`
+	Name         string    `json:"name"`
+	Type         string    `json:"type"`
+	Host         string    `json:"host"`
+	Port         int       `json:"port"`
+	Protocol     string    `json:"protocol"`
+	Capabilities string    `json:"capabilities"`
+	IsActive     bool      `json:"isActive"`
+	LastSeen     time.Time `json:"lastSeen"`
+}
+
+func (d *DB) InsertCastDevice(name, devType, host string, port int, protocol, capabilities string) (int64, error) {
+	res, err := d.Exec(
+		`INSERT INTO cast_devices(name, type, host, port, protocol, capabilities, last_seen)
+		 VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		 ON CONFLICT(name) DO UPDATE SET
+		   host=excluded.host, port=excluded.port, last_seen=excluded.last_seen`,
+		name, devType, host, port, protocol, capabilities,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+func (d *DB) CastDevices() ([]CastDevice, error) {
+	rows, err := d.Query(`SELECT id, name, type, host, port, protocol, capabilities, is_active, last_seen FROM cast_devices ORDER BY last_seen DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var devices []CastDevice
+	for rows.Next() {
+		var dev CastDevice
+		var isActive int
+		err := rows.Scan(&dev.ID, &dev.Name, &dev.Type, &dev.Host, &dev.Port, &dev.Protocol, &dev.Capabilities, &isActive, &dev.LastSeen)
+		if err != nil {
+			return nil, err
+		}
+		dev.IsActive = isActive != 0
+		devices = append(devices, dev)
+	}
+	return devices, rows.Err()
+}
+
+func (d *DB) UpdateCastDeviceActivity(id int64, active bool) error {
+	val := 0
+	if active {
+		val = 1
+	}
+	_, err := d.Exec(`UPDATE cast_devices SET is_active = ? WHERE id = ?`, val, id)
+	return err
+}
+
+func (d *DB) DeleteCastDevice(id int64) error {
+	_, err := d.Exec(`DELETE FROM cast_devices WHERE id = ?`, id)
+	return err
+}
+
+type DSPPreset struct {
+	ID                  int64   `json:"id"`
+	Name                string  `json:"name"`
+	UserID              int64   `json:"userId"`
+	EQLow               float64 `json:"eqLow"`
+	EQMid               float64 `json:"eqMid"`
+	EQHigh              float64 `json:"eqHigh"`
+	CompressorThreshold float64 `json:"compressorThreshold"`
+	CompressorRatio     float64 `json:"compressorRatio"`
+	LoudnessTarget      float64 `json:"loudnessTarget"`
+	IsDefault           bool    `json:"isDefault"`
+}
+
+func (d *DB) InsertDSPPreset(name string, userID int64, eqLow, eqMid, eqHigh, compThreshold, compRatio, loudnessTarget float64, isDefault bool) (int64, error) {
+	defaultVal := 0
+	if isDefault {
+		defaultVal = 1
+		_, _ = d.Exec(`UPDATE dsp_presets SET is_default = 0 WHERE user_id = ?`, userID)
+	}
+	res, err := d.Exec(
+		`INSERT INTO dsp_presets(name, user_id, eq_low, eq_mid, eq_high, compressor_threshold, compressor_ratio, loudness_target, is_default)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		name, userID, eqLow, eqMid, eqHigh, compThreshold, compRatio, loudnessTarget, defaultVal,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+func (d *DB) DSPPresets(userID int64) ([]DSPPreset, error) {
+	rows, err := d.Query(
+		`SELECT id, name, user_id, eq_low, eq_mid, eq_high, compressor_threshold, compressor_ratio, loudness_target, is_default
+		 FROM dsp_presets WHERE user_id = ? OR user_id = 0 ORDER BY is_default DESC, name`,
+		userID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var presets []DSPPreset
+	for rows.Next() {
+		var p DSPPreset
+		var isDefault int
+		err := rows.Scan(&p.ID, &p.Name, &p.UserID, &p.EQLow, &p.EQMid, &p.EQHigh, &p.CompressorThreshold, &p.CompressorRatio, &p.LoudnessTarget, &isDefault)
+		if err != nil {
+			return nil, err
+		}
+		p.IsDefault = isDefault != 0
+		presets = append(presets, p)
+	}
+	return presets, rows.Err()
+}
+
+func (d *DB) DSPPresetByID(id int64) (*DSPPreset, error) {
+	var p DSPPreset
+	var isDefault int
+	err := d.QueryRow(
+		`SELECT id, name, user_id, eq_low, eq_mid, eq_high, compressor_threshold, compressor_ratio, loudness_target, is_default
+		 FROM dsp_presets WHERE id = ?`, id,
+	).Scan(&p.ID, &p.Name, &p.UserID, &p.EQLow, &p.EQMid, &p.EQHigh, &p.CompressorThreshold, &p.CompressorRatio, &p.LoudnessTarget, &isDefault)
+	if err != nil {
+		return nil, err
+	}
+	p.IsDefault = isDefault != 0
+	return &p, nil
+}
+
+func (d *DB) DeleteDSPPreset(id int64) error {
+	_, err := d.Exec(`DELETE FROM dsp_presets WHERE id = ?`, id)
+	return err
+}
+
+type SyncRoom struct {
+	ID              int64     `json:"id"`
+	Name            string    `json:"name"`
+	OwnerID         *int64    `json:"ownerId,omitempty"`
+	Token           string    `json:"token"`
+	CurrentTrackID  *int64    `json:"currentTrackId,omitempty"`
+	Position        float64   `json:"position"`
+	State           string    `json:"state"`
+	MasterSessionID *int64    `json:"masterSessionId,omitempty"`
+	CreatedAt       time.Time `json:"createdAt"`
+}
+
+func (d *DB) SyncRoomByToken(token string) (*SyncRoom, error) {
+	var r SyncRoom
+	var ownerID NullInt64
+	var currentTrackID NullInt64
+	var masterSessionID NullInt64
+
+	err := d.QueryRow(
+		`SELECT id, name, owner_id, token, current_track_id, position, state, master_session_id, created_at
+		 FROM sync_rooms WHERE token = ?`, token,
+	).Scan(&r.ID, &r.Name, &ownerID, &r.Token, &currentTrackID, &r.Position, &r.State, &masterSessionID, &r.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	if ownerID.Valid {
+		r.OwnerID = &ownerID.Int64
+	}
+	if currentTrackID.Valid {
+		r.CurrentTrackID = &currentTrackID.Int64
+	}
+	if masterSessionID.Valid {
+		r.MasterSessionID = &masterSessionID.Int64
+	}
+	return &r, nil
+}
+
+func (d *DB) SyncRooms() ([]SyncRoom, error) {
+	rows, err := d.Query(
+		`SELECT id, name, owner_id, token, current_track_id, position, state, master_session_id, created_at
+		 FROM sync_rooms ORDER BY created_at DESC`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var rooms []SyncRoom
+	for rows.Next() {
+		var r SyncRoom
+		var ownerID NullInt64
+		var currentTrackID NullInt64
+		var masterSessionID NullInt64
+
+		err := rows.Scan(&r.ID, &r.Name, &ownerID, &r.Token, &currentTrackID, &r.Position, &r.State, &masterSessionID, &r.CreatedAt)
+		if err != nil {
+			return nil, err
+		}
+		if ownerID.Valid {
+			r.OwnerID = &ownerID.Int64
+		}
+		if currentTrackID.Valid {
+			r.CurrentTrackID = &currentTrackID.Int64
+		}
+		if masterSessionID.Valid {
+			r.MasterSessionID = &masterSessionID.Int64
+		}
+		rooms = append(rooms, r)
+	}
+	return rooms, rows.Err()
+}
+
+func (d *DB) DeleteSyncRoom(id int64) error {
+	_, err := d.Exec(`DELETE FROM sync_rooms WHERE id = ?`, id)
+	return err
+}
+
