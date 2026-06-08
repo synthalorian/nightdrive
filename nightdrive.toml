@@ -1,0 +1,9 @@
+listen = "0.0.0.0:4040"
+database = "data/nightdrive.db"
+music_dir = []
+scan_on_start = true
+
+[transcode]
+enabled = false
+format = "mp3"
+bitrate = 320
