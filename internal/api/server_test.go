@@ -28,7 +28,7 @@ func setupTestServer(t *testing.T) (*Server, *db.DB, func()) {
 
 	cfg := config.Default()
 	scan := scanner.New(cfg, database)
-	srv := NewServer(cfg, database, scan)
+	srv := NewServer(cfg, database, scan, nil)
 
 	cleanup := func() {
 		database.Close()
