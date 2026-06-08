@@ -17,6 +17,14 @@ type Config struct {
 		Format  string `toml:"format"`
 		Bitrate int    `toml:"bitrate"`
 	} `toml:"transcode"`
+	Playback struct {
+		CrossfadeEnabled   bool    `toml:"crossfade_enabled"`
+		CrossfadeDuration  float64 `toml:"crossfade_duration"`
+		GaplessEnabled     bool    `toml:"gapless_enabled"`
+		DSPPipelineEnabled bool    `toml:"dsp_pipeline_enabled"`
+		MultiRoomEnabled   bool    `toml:"multi_room_enabled"`
+		CastingEnabled     bool    `toml:"casting_enabled"`
+	} `toml:"playback"`
 }
 
 // Default returns a default configuration.
@@ -34,6 +42,21 @@ func Default() *Config {
 			Enabled: false,
 			Format:  "mp3",
 			Bitrate: 320,
+		},
+		Playback: struct {
+			CrossfadeEnabled   bool    `toml:"crossfade_enabled"`
+			CrossfadeDuration  float64 `toml:"crossfade_duration"`
+			GaplessEnabled     bool    `toml:"gapless_enabled"`
+			DSPPipelineEnabled bool    `toml:"dsp_pipeline_enabled"`
+			MultiRoomEnabled   bool    `toml:"multi_room_enabled"`
+			CastingEnabled     bool    `toml:"casting_enabled"`
+		}{
+			CrossfadeEnabled:   true,
+			CrossfadeDuration:  5.0,
+			GaplessEnabled:     true,
+			DSPPipelineEnabled: true,
+			MultiRoomEnabled:   true,
+			CastingEnabled:     true,
 		},
 	}
 }
@@ -68,6 +91,18 @@ func Load(path string) (*Config, error) {
 			cfg.MusicDir = append(cfg.MusicDir, val)
 		case "scan_on_start":
 			cfg.ScanOnStart = val == "true"
+		case "crossfade_enabled":
+			cfg.Playback.CrossfadeEnabled = val == "true"
+		case "crossfade_duration":
+			fmt.Sscanf(val, "%f", &cfg.Playback.CrossfadeDuration)
+		case "gapless_enabled":
+			cfg.Playback.GaplessEnabled = val == "true"
+		case "dsp_pipeline_enabled":
+			cfg.Playback.DSPPipelineEnabled = val == "true"
+		case "multi_room_enabled":
+			cfg.Playback.MultiRoomEnabled = val == "true"
+		case "casting_enabled":
+			cfg.Playback.CastingEnabled = val == "true"
 		}
 	}
 	return cfg, nil
