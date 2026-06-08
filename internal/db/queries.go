@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // InsertArtist inserts or returns an existing artist.
@@ -45,14 +46,14 @@ func (d *DB) InsertAlbum(artistID int64, title string, year int, cover string) (
 // InsertTrack inserts or updates a track.
 func (d *DB) InsertTrack(t *Track) (int64, error) {
 	res, err := d.Exec(
-		`INSERT INTO tracks(album_id, artist_id, title, disc_number, track_number, duration, bitrate, format, path, mtime, size, lyrics, media_type, playback_position)
-		 VALUES (:aid, :arid, :title, :disc, :track, :dur, :bit, :fmt, :path, :mtime, :size, :lyrics, :mediaType, :pos)
+		`INSERT INTO tracks(album_id, artist_id, title, disc_number, track_number, duration, bitrate, format, path, mtime, size, lyrics, media_type, playback_position, genre)
+		 VALUES (:aid, :arid, :title, :disc, :track, :dur, :bit, :fmt, :path, :mtime, :size, :lyrics, :mediaType, :pos, :genre)
 		 ON CONFLICT(path) DO UPDATE SET
 		   album_id=excluded.album_id, artist_id=excluded.artist_id, title=excluded.title,
 		   disc_number=excluded.disc_number, track_number=excluded.track_number,
 		   duration=excluded.duration, bitrate=excluded.bitrate, format=excluded.format,
 		   mtime=excluded.mtime, size=excluded.size, lyrics=excluded.lyrics, media_type=excluded.media_type,
-		   playback_position=excluded.playback_position`,
+		   playback_position=excluded.playback_position, genre=excluded.genre`,
 		sql.Named("aid", t.AlbumID),
 		sql.Named("arid", t.ArtistID),
 		sql.Named("title", t.Title),
@@ -67,6 +68,7 @@ func (d *DB) InsertTrack(t *Track) (int64, error) {
 		sql.Named("lyrics", t.Lyrics),
 		sql.Named("mediaType", t.MediaType),
 		sql.Named("pos", t.PlaybackPosition),
+		sql.Named("genre", t.Genre),
 	)
 	if err != nil {
 		return 0, err
@@ -81,7 +83,7 @@ func (d *DB) TrackByID(id int64) (*Track, error) {
 		       COALESCE(a.name,'') AS artist_name,
 		       COALESCE(al.title,'') AS album_title,
 		       t.disc_number, t.track_number, t.duration, t.bitrate, t.format, t.path, t.mtime, t.size,
-		       t.lyrics, t.media_type, t.playback_position
+		       t.lyrics, t.media_type, t.playback_position, t.genre
 		FROM tracks t
 		LEFT JOIN artists a ON a.id = t.artist_id
 		LEFT JOIN albums al ON al.id = t.album_id
@@ -99,7 +101,7 @@ func (d *DB) Tracks(offset, limit int) ([]Track, error) {
 		       COALESCE(a.name,'') AS artist_name,
 		       COALESCE(al.title,'') AS album_title,
 		       t.disc_number, t.track_number, t.duration, t.bitrate, t.format, t.path, t.mtime, t.size,
-		       t.lyrics, t.media_type, t.playback_position
+		       t.lyrics, t.media_type, t.playback_position, t.genre
 		FROM tracks t
 		LEFT JOIN artists a ON a.id = t.artist_id
 		LEFT JOIN albums al ON al.id = t.album_id
@@ -123,7 +125,7 @@ func (d *DB) SearchTracks(q string, offset, limit int) ([]Track, error) {
 		       COALESCE(a.name,'') AS artist_name,
 		       COALESCE(al.title,'') AS album_title,
 		       t.disc_number, t.track_number, t.duration, t.bitrate, t.format, t.path, t.mtime, t.size,
-		       t.lyrics, t.media_type, t.playback_position
+		       t.lyrics, t.media_type, t.playback_position, t.genre
 		FROM tracks t
 		LEFT JOIN artists a ON a.id = t.artist_id
 		LEFT JOIN albums al ON al.id = t.album_id
@@ -187,7 +189,7 @@ func (d *DB) AlbumTracks(albumID int64) ([]Track, error) {
 		       COALESCE(a.name,'') AS artist_name,
 		       COALESCE(al.title,'') AS album_title,
 		       t.disc_number, t.track_number, t.duration, t.bitrate, t.format, t.path, t.mtime, t.size,
-		       t.lyrics, t.media_type, t.playback_position
+		       t.lyrics, t.media_type, t.playback_position, t.genre
 		FROM tracks t
 		LEFT JOIN artists a ON a.id = t.artist_id
 		LEFT JOIN albums al ON al.id = t.album_id
@@ -205,12 +207,13 @@ func scanTrack(scanner interface{ Scan(...interface{}) error }) (*Track, error) 
 	var albumID, artistID sql.NullInt64
 	var lyrics sql.NullString
 	var mediaType sql.NullString
+	var genre sql.NullString
 	err := scanner.Scan(
 		&t.ID, &albumID, &artistID, &t.Title,
 		&t.ArtistName, &t.AlbumTitle,
 		&t.DiscNumber, &t.TrackNumber, &t.Duration, &t.Bitrate, &t.Format,
 		&t.Path, &t.Mtime, &t.Size,
-		&lyrics, &mediaType, &t.PlaybackPosition,
+		&lyrics, &mediaType, &t.PlaybackPosition, &genre,
 	)
 	if err != nil {
 		return nil, err
@@ -228,6 +231,9 @@ func scanTrack(scanner interface{ Scan(...interface{}) error }) (*Track, error) 
 	}
 	if mediaType.Valid {
 		t.MediaType = mediaType.String
+	}
+	if genre.Valid {
+		t.Genre = genre.String
 	}
 	return &t, nil
 }
@@ -282,7 +288,7 @@ func (d *DB) SmartTracks(query string) ([]Track, error) {
 		       COALESCE(a.name,'') AS artist_name,
 		       COALESCE(al.title,'') AS album_title,
 		       t.disc_number, t.track_number, t.duration, t.bitrate, t.format, t.path, t.mtime, t.size,
-		       t.lyrics, t.media_type, t.playback_position
+		       t.lyrics, t.media_type, t.playback_position, t.genre
 		FROM tracks t
 		LEFT JOIN artists a ON a.id = t.artist_id
 		LEFT JOIN albums al ON al.id = t.album_id
@@ -347,7 +353,7 @@ func (d *DB) PlaylistTracks(pid int64) ([]Track, error) {
 		       COALESCE(a.name,'') AS artist_name,
 		       COALESCE(al.title,'') AS album_title,
 		       t.disc_number, t.track_number, t.duration, t.bitrate, t.format, t.path, t.mtime, t.size,
-		       t.lyrics, t.media_type, t.playback_position
+		       t.lyrics, t.media_type, t.playback_position, t.genre
 		FROM playlist_tracks pt
 		JOIN tracks t ON t.id = pt.track_id
 		LEFT JOIN artists a ON a.id = t.artist_id
@@ -416,7 +422,7 @@ func (d *DB) TracksByMediaType(mediaType string, offset, limit int) ([]Track, er
 		       COALESCE(a.name,'') AS artist_name,
 		       COALESCE(al.title,'') AS album_title,
 		       t.disc_number, t.track_number, t.duration, t.bitrate, t.format, t.path, t.mtime, t.size,
-		       t.lyrics, t.media_type, t.playback_position
+		       t.lyrics, t.media_type, t.playback_position, t.genre
 		FROM tracks t
 		LEFT JOIN artists a ON a.id = t.artist_id
 		LEFT JOIN albums al ON al.id = t.album_id
@@ -429,3 +435,423 @@ func (d *DB) TracksByMediaType(mediaType string, offset, limit int) ([]Track, er
 	defer rows.Close()
 	return scanTracks(rows)
 }
+
+func (d *DB) InsertUser(username, passwordHash, role string) (int64, error) {
+	res, err := d.Exec("INSERT INTO users(username, password_hash, role) VALUES (?,?,?)", username, passwordHash, role)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+func (d *DB) UserByUsername(username string) (*User, error) {
+	var u User
+	err := d.QueryRow("SELECT id, username, password_hash, role, created_at FROM users WHERE username = ?", username).Scan(
+		&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &u, nil
+}
+
+func (d *DB) UserByID(id int64) (*User, error) {
+	var u User
+	err := d.QueryRow("SELECT id, username, password_hash, role, created_at FROM users WHERE id = ?", id).Scan(
+		&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &u, nil
+}
+
+func (d *DB) UpdateUserPassword(id int64, hash string) error {
+	_, err := d.Exec("UPDATE users SET password_hash = ? WHERE id = ?", hash, id)
+	return err
+}
+
+func (d *DB) DeleteUser(id int64) error {
+	_, err := d.Exec("DELETE FROM users WHERE id = ?", id)
+	return err
+}
+
+func (d *DB) Users() ([]User, error) {
+	rows, err := d.Query("SELECT id, username, password_hash, role, created_at FROM users ORDER BY username")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []User
+	for rows.Next() {
+		var u User
+		if err := rows.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
+func (d *DB) CreateSession(userID int64, token string, expiresAt time.Time) (int64, error) {
+	res, err := d.Exec("INSERT INTO sessions(user_id, token, expires_at) VALUES (?,?,?)", userID, token, expiresAt)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+func (d *DB) SessionByToken(token string) (*Session, error) {
+	var s Session
+	err := d.QueryRow("SELECT id, user_id, token, expires_at, created_at FROM sessions WHERE token = ? AND expires_at > datetime('now')", token).Scan(
+		&s.ID, &s.UserID, &s.Token, &s.ExpiresAt, &s.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &s, nil
+}
+
+func (d *DB) DeleteSession(token string) error {
+	_, err := d.Exec("DELETE FROM sessions WHERE token = ?", token)
+	return err
+}
+
+func (d *DB) CleanExpiredSessions() error {
+	_, err := d.Exec("DELETE FROM sessions WHERE expires_at <= datetime('now')")
+	return err
+}
+
+func (d *DB) PlaylistsForUser(userID int64) ([]Playlist, error) {
+	rows, err := d.Query(`
+		SELECT p.id, p.name, p.owner_id, p.visibility, p.smart_query, p.created_at, p.updated_at
+		FROM playlists p
+		LEFT JOIN playlist_shares ps ON ps.playlist_id = p.id
+		WHERE p.owner_id = ? OR p.visibility = 'public' OR (p.visibility = 'shared' AND ps.user_id = ?)
+		GROUP BY p.id
+		ORDER BY p.name`, userID, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanPlaylists(rows)
+}
+
+func (d *DB) InsertPlaylistWithOwner(name, smartQuery string, ownerID int64, visibility string) (int64, error) {
+	var sq interface{}
+	if smartQuery != "" {
+		sq = smartQuery
+	}
+	res, err := d.Exec(`INSERT INTO playlists(name, owner_id, visibility, smart_query) VALUES (?,?,?,?)`, name, ownerID, visibility, sq)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+func (d *DB) UpdatePlaylistVisibility(pid int64, visibility string) error {
+	_, err := d.Exec("UPDATE playlists SET visibility = ? WHERE id = ?", visibility, pid)
+	return err
+}
+
+func (d *DB) PlaylistOwner(pid int64) (int64, error) {
+	var ownerID sql.NullInt64
+	err := d.QueryRow("SELECT owner_id FROM playlists WHERE id = ?", pid).Scan(&ownerID)
+	if err != nil {
+		return 0, err
+	}
+	if ownerID.Valid {
+		return ownerID.Int64, nil
+	}
+	return 0, nil
+}
+
+func (d *DB) SharePlaylist(pid, userID int64) error {
+	_, err := d.Exec("INSERT OR IGNORE INTO playlist_shares(playlist_id, user_id) VALUES (?,?)", pid, userID)
+	return err
+}
+
+func (d *DB) UnsharePlaylist(pid, userID int64) error {
+	_, err := d.Exec("DELETE FROM playlist_shares WHERE playlist_id = ? AND user_id = ?", pid, userID)
+	return err
+}
+
+func scanPlaylists(rows *sql.Rows) ([]Playlist, error) {
+	var out []Playlist
+	for rows.Next() {
+		var p Playlist
+		var sq sql.NullString
+		var ownerID sql.NullInt64
+		if err := rows.Scan(&p.ID, &p.Name, &ownerID, &p.Visibility, &sq, &p.CreatedAt, &p.UpdatedAt); err != nil {
+			return nil, err
+		}
+		if sq.Valid {
+			p.SmartQuery = &sq.String
+		}
+		if ownerID.Valid {
+			p.OwnerID = &ownerID.Int64
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func (d *DB) InsertPlay(userID, trackID int64, durationListened, completionPct float64) (int64, error) {
+	res, err := d.Exec(
+		"INSERT INTO plays(user_id, track_id, duration_listened, completion_pct) VALUES (?,?,?,?)",
+		userID, trackID, durationListened, completionPct)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+func (d *DB) PlaysByUser(userID int64, offset, limit int) ([]Play, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 50
+	}
+	rows, err := d.Query(
+		"SELECT id, user_id, track_id, played_at, duration_listened, completion_pct FROM plays WHERE user_id = ? ORDER BY played_at DESC LIMIT ? OFFSET ?",
+		userID, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Play
+	for rows.Next() {
+		var p Play
+		if err := rows.Scan(&p.ID, &p.UserID, &p.TrackID, &p.PlayedAt, &p.DurationListened, &p.CompletionPct); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func (d *DB) StatsForUser(userID int64) (*Stats, error) {
+	var s Stats
+	err := d.QueryRow("SELECT COUNT(*), COALESCE(SUM(duration_listened),0), COUNT(DISTINCT track_id) FROM plays WHERE user_id = ?", userID).Scan(
+		&s.TotalPlays, &s.TotalDuration, &s.UniqueTracks)
+	if err != nil {
+		return nil, err
+	}
+	err = d.QueryRow(`
+		SELECT COUNT(DISTINCT t.artist_id) FROM plays p
+		JOIN tracks t ON t.id = p.track_id WHERE p.user_id = ?`, userID).Scan(&s.UniqueArtists)
+	if err != nil {
+		return nil, err
+	}
+	trackRows, err := d.Query(`
+		SELECT t.id, t.album_id, t.artist_id, t.title,
+		       COALESCE(a.name,'') AS artist_name,
+		       COALESCE(al.title,'') AS album_title,
+		       t.disc_number, t.track_number, t.duration, t.bitrate, t.format, t.path, t.mtime, t.size,
+		       t.lyrics, t.media_type, t.playback_position, t.genre
+		FROM plays p
+		JOIN tracks t ON t.id = p.track_id
+		LEFT JOIN artists a ON a.id = t.artist_id
+		LEFT JOIN albums al ON al.id = t.album_id
+		WHERE p.user_id = ?
+		GROUP BY t.id
+		ORDER BY COUNT(*) DESC
+		LIMIT 10`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer trackRows.Close()
+	s.TopTracks, err = scanTracks(trackRows)
+	if err != nil {
+		return nil, err
+	}
+	artRows, err := d.Query(`
+		SELECT a.id, a.name, a.created_at, COUNT(*) as cnt
+		FROM plays p
+		JOIN tracks t ON t.id = p.track_id
+		JOIN artists a ON a.id = t.artist_id
+		WHERE p.user_id = ?
+		GROUP BY a.id
+		ORDER BY cnt DESC
+		LIMIT 10`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer artRows.Close()
+	for artRows.Next() {
+		var ac ArtistCount
+		if err := artRows.Scan(&ac.Artist.ID, &ac.Artist.Name, &ac.Artist.CreatedAt, &ac.Count); err != nil {
+			return nil, err
+		}
+		s.TopArtists = append(s.TopArtists, ac)
+	}
+	return &s, nil
+}
+
+func (d *DB) SimilarAlbums(artistID int64, excludeAlbumID int64, limit int) ([]Album, error) {
+	if limit <= 0 || limit > 50 {
+		limit = 10
+	}
+	rows, err := d.Query(`
+		SELECT id, artist_id, title, year, cover_art FROM albums
+		WHERE artist_id = ? AND id != ?
+		ORDER BY year DESC
+		LIMIT ?`, artistID, excludeAlbumID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Album
+	for rows.Next() {
+		var a Album
+		var cover sql.NullString
+		if err := rows.Scan(&a.ID, &a.ArtistID, &a.Title, &a.Year, &cover); err != nil {
+			return nil, err
+		}
+		if cover.Valid {
+			a.CoverArt = &cover.String
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+func (d *DB) SimilarArtists(artistID int64, limit int) ([]Artist, error) {
+	if limit <= 0 || limit > 50 {
+		limit = 10
+	}
+	rows, err := d.Query(`
+		SELECT DISTINCT a.id, a.name, a.created_at FROM artists a
+		JOIN tracks t ON t.artist_id = a.id
+		JOIN playlist_tracks pt ON pt.track_id = t.id
+		WHERE pt.playlist_id IN (
+			SELECT DISTINCT playlist_id FROM playlist_tracks pt2
+			JOIN tracks t2 ON t2.id = pt2.track_id
+			WHERE t2.artist_id = ?
+		) AND a.id != ?
+		LIMIT ?`, artistID, artistID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Artist
+	for rows.Next() {
+		var a Artist
+		if err := rows.Scan(&a.ID, &a.Name, &a.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+func (d *DB) RecommendedTracks(userID int64, limit int) ([]Track, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	rows, err := d.Query(`
+		SELECT t.id, t.album_id, t.artist_id, t.title,
+		       COALESCE(a.name,'') AS artist_name,
+		       COALESCE(al.title,'') AS album_title,
+		       t.disc_number, t.track_number, t.duration, t.bitrate, t.format, t.path, t.mtime, t.size,
+		       t.lyrics, t.media_type, t.playback_position, t.genre
+		FROM plays p
+		JOIN tracks t ON t.id = p.track_id
+		LEFT JOIN artists a ON a.id = t.artist_id
+		LEFT JOIN albums al ON al.id = t.album_id
+		WHERE p.user_id IN (
+			SELECT DISTINCT p2.user_id FROM plays p2
+			WHERE p2.track_id IN (SELECT track_id FROM plays WHERE user_id = ?)
+			AND p2.user_id != ?
+		)
+		AND t.id NOT IN (SELECT track_id FROM plays WHERE user_id = ?)
+		GROUP BY t.id
+		ORDER BY COUNT(*) DESC
+		LIMIT ?`, userID, userID, userID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanTracks(rows)
+}
+
+func (d *DB) RadioTracksByGenre(genre string, limit int) ([]Track, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 50
+	}
+	rows, err := d.Query(`
+		SELECT t.id, t.album_id, t.artist_id, t.title,
+		       COALESCE(a.name,'') AS artist_name,
+		       COALESCE(al.title,'') AS album_title,
+		       t.disc_number, t.track_number, t.duration, t.bitrate, t.format, t.path, t.mtime, t.size,
+		       t.lyrics, t.media_type, t.playback_position, t.genre
+		FROM tracks t
+		LEFT JOIN artists a ON a.id = t.artist_id
+		LEFT JOIN albums al ON al.id = t.album_id
+		WHERE t.genre = ?
+		ORDER BY RANDOM()
+		LIMIT ?`, genre, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanTracks(rows)
+}
+
+func (d *DB) RadioTracksByArtist(artistID int64, limit int) ([]Track, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 50
+	}
+	rows, err := d.Query(`
+		SELECT t.id, t.album_id, t.artist_id, t.title,
+		       COALESCE(a.name,'') AS artist_name,
+		       COALESCE(al.title,'') AS album_title,
+		       t.disc_number, t.track_number, t.duration, t.bitrate, t.format, t.path, t.mtime, t.size,
+		       t.lyrics, t.media_type, t.playback_position, t.genre
+		FROM tracks t
+		LEFT JOIN artists a ON a.id = t.artist_id
+		LEFT JOIN albums al ON al.id = t.album_id
+		WHERE t.artist_id = ?
+		ORDER BY RANDOM()
+		LIMIT ?`, artistID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanTracks(rows)
+}
+
+func (d *DB) RadioTracksRandom(limit int) ([]Track, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 50
+	}
+	rows, err := d.Query(`
+		SELECT t.id, t.album_id, t.artist_id, t.title,
+		       COALESCE(a.name,'') AS artist_name,
+		       COALESCE(al.title,'') AS album_title,
+		       t.disc_number, t.track_number, t.duration, t.bitrate, t.format, t.path, t.mtime, t.size,
+		       t.lyrics, t.media_type, t.playback_position, t.genre
+		FROM tracks t
+		LEFT JOIN artists a ON a.id = t.artist_id
+		LEFT JOIN albums al ON al.id = t.album_id
+		ORDER BY RANDOM()
+		LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanTracks(rows)
+}
+
+func (d *DB) Genres() ([]string, error) {
+	rows, err := d.Query("SELECT DISTINCT genre FROM tracks WHERE genre IS NOT NULL AND genre != '' ORDER BY genre")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var g string
+		if err := rows.Scan(&g); err != nil {
+			return nil, err
+		}
+		out = append(out, g)
+	}
+	return out, rows.Err()
+}
+
