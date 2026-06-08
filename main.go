@@ -20,6 +20,7 @@ var (
 	scanner    *Scanner
 	stream     *StreamHandler
 	transcoder *Transcoder
+	scrobbler  *Scrobbler
 )
 
 type Config struct {
@@ -65,6 +66,8 @@ func main() {
 	// Initialize transcoder
 	transcoder = NewTranscoder(cfg.MusicPath)
 
+	scrobbler = NewScrobbler(db)
+
 	// Create default admin user if none exist
 	admin, err := initDefaultUser()
 	if err != nil {
@@ -92,9 +95,13 @@ func main() {
 	mux.HandleFunc("/api/playlists", apiKeyAuth(handlePlaylists))
 	mux.HandleFunc("/api/playlists/", apiKeyAuth(handlePlaylistDetail))
 
-	// Auth endpoints
+	mux.HandleFunc("/api/smart-playlists", apiKeyAuth(handleSmartPlaylists))
+	mux.HandleFunc("/api/smart-playlists/", apiKeyAuth(handleSmartPlaylistDetail))
+	mux.HandleFunc("/api/lyrics/", apiKeyAuth(handleLyrics))
 	mux.HandleFunc("/api/auth/register", handleRegister)
 	mux.HandleFunc("/api/auth/me", apiKeyAuth(handleMe))
+	mux.HandleFunc("/api/users/me/lastfm", apiKeyAuth(handleUserLastFM))
+	mux.HandleFunc("/api/users/me/quota", apiKeyAuth(handleUserQuota))
 
 	// Star endpoints
 	mux.HandleFunc("/api/stars", apiKeyAuth(handleGetStars))
@@ -367,8 +374,7 @@ func handlePlaylistDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse ID and optional action
-	parts := strings.SplitN(path, "/", 2)
+	parts := strings.Split(path, "/")
 	playlistID, err := strconv.ParseInt(parts[0], 10, 64)
 	if err != nil {
 		http.Error(w, "Invalid playlist ID", http.StatusBadRequest)
@@ -376,8 +382,12 @@ func handlePlaylistDetail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	action := ""
+	trackID := int64(0)
 	if len(parts) > 1 {
 		action = parts[1]
+	}
+	if len(parts) > 2 {
+		trackID, _ = strconv.ParseInt(parts[2], 10, 64)
 	}
 
 	switch r.Method {
@@ -415,6 +425,14 @@ func handlePlaylistDetail(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, playlist)
 
 	case http.MethodDelete:
+		if action == "tracks" && trackID > 0 {
+			if err := db.RemoveTrackFromPlaylist(playlistID, trackID); err != nil {
+				http.Error(w, fmt.Sprintf("Failed to remove track: %v", err), http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		if action != "" {
 			http.Error(w, "Invalid action", http.StatusBadRequest)
 			return
@@ -426,7 +444,6 @@ func handlePlaylistDetail(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 
 	case http.MethodPost:
-		// Handle /api/playlists/{id}/tracks
 		if action != "tracks" {
 			http.Error(w, "Invalid action", http.StatusBadRequest)
 			return
@@ -465,4 +482,223 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/html")
 	w.Write(data)
+}
+
+func handleSmartPlaylists(w http.ResponseWriter, r *http.Request) {
+	user := getUserFromRequest(r)
+	userID := int64(0)
+	if user != nil {
+		userID = user.ID
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		playlists, err := db.GetAllSmartPlaylists(userID)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to get smart playlists: %v", err), http.StatusInternalServerError)
+			return
+		}
+		jsonResponse(w, map[string]interface{}{"smart_playlists": playlists})
+
+	case http.MethodPost:
+		var req struct {
+			Name      string `json:"name"`
+			RuleType  string `json:"rule_type"`
+			RuleValue string `json:"rule_value"`
+			LimitNum  int    `json:"limit_num"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if strings.TrimSpace(req.Name) == "" {
+			http.Error(w, "Name required", http.StatusBadRequest)
+			return
+		}
+		if req.RuleType == "" {
+			req.RuleType = "random"
+		}
+		if req.LimitNum <= 0 {
+			req.LimitNum = 50
+		}
+		playlist, err := db.CreateSmartPlaylist(userID, req.Name, req.RuleType, req.RuleValue, req.LimitNum)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to create smart playlist: %v", err), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		jsonResponse(w, playlist)
+
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func handleSmartPlaylistDetail(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/smart-playlists/")
+	if path == "" {
+		http.Error(w, "Smart playlist ID required", http.StatusBadRequest)
+		return
+	}
+
+	playlistID, err := strconv.ParseInt(path, 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid smart playlist ID", http.StatusBadRequest)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		playlist, err := db.GetSmartPlaylistByID(playlistID)
+		if err != nil {
+			http.Error(w, "Smart playlist not found", http.StatusNotFound)
+			return
+		}
+		tracks, err := db.GetSmartPlaylistTracks(playlist)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to get tracks: %v", err), http.StatusInternalServerError)
+			return
+		}
+		jsonResponse(w, map[string]interface{}{
+			"smart_playlist": playlist,
+			"tracks":         tracks,
+		})
+
+	case http.MethodPut:
+		var req struct {
+			Name      string `json:"name"`
+			RuleType  string `json:"rule_type"`
+			RuleValue string `json:"rule_value"`
+			LimitNum  int    `json:"limit_num"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid JSON", http.StatusBadRequest)
+			return
+		}
+		playlist, err := db.UpdateSmartPlaylist(playlistID, req.Name, req.RuleType, req.RuleValue, req.LimitNum)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to update smart playlist: %v", err), http.StatusInternalServerError)
+			return
+		}
+		jsonResponse(w, playlist)
+
+	case http.MethodDelete:
+		if err := db.DeleteSmartPlaylist(playlistID); err != nil {
+			http.Error(w, fmt.Sprintf("Failed to delete smart playlist: %v", err), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func handleLyrics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	path := strings.TrimPrefix(r.URL.Path, "/api/lyrics/")
+	if path == "" {
+		http.Error(w, "Track ID required", http.StatusBadRequest)
+		return
+	}
+
+	trackID, err := strconv.ParseInt(path, 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid track ID", http.StatusBadRequest)
+		return
+	}
+
+	lyrics, err := db.GetLyrics(trackID)
+	if err != nil {
+		jsonResponse(w, map[string]interface{}{"track_id": trackID, "lyrics": "", "synced": false})
+		return
+	}
+
+	jsonResponse(w, map[string]interface{}{
+		"track_id": trackID,
+		"lyrics":   lyrics.Content,
+		"synced":   lyrics.Synced,
+		"source":   lyrics.Source,
+	})
+}
+
+func handleUserLastFM(w http.ResponseWriter, r *http.Request) {
+	user := getUserFromRequest(r)
+	if user == nil {
+		http.Error(w, `{"error":"Unauthorized"}`, http.StatusUnauthorized)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		jsonResponse(w, map[string]interface{}{
+			"lastfm_username":    user.LastFMUsername,
+			"lastfm_api_key":     user.LastFMAPIKey,
+			"lastfm_linked":      user.LastFMSessionKey != "",
+		})
+
+	case http.MethodPost:
+		var req struct {
+			Username   string `json:"username"`
+			SessionKey string `json:"session_key"`
+			APIKey     string `json:"api_key"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if err := db.UpdateUserLastFM(user.ID, req.Username, req.SessionKey); err != nil {
+			http.Error(w, fmt.Sprintf("Failed to update Last.fm: %v", err), http.StatusInternalServerError)
+			return
+		}
+		if req.APIKey != "" {
+			_, err := db.conn.Exec("UPDATE users SET lastfm_api_key = ? WHERE id = ?", req.APIKey, user.ID)
+			if err != nil {
+				http.Error(w, fmt.Sprintf("Failed to update API key: %v", err), http.StatusInternalServerError)
+				return
+			}
+		}
+		jsonResponse(w, map[string]string{"status": "updated"})
+
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func handleUserQuota(w http.ResponseWriter, r *http.Request) {
+	user := getUserFromRequest(r)
+	if user == nil {
+		http.Error(w, `{"error":"Unauthorized"}`, http.StatusUnauthorized)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		jsonResponse(w, map[string]interface{}{
+			"quota_bytes":      user.QuotaBytes,
+			"quota_used_bytes": user.QuotaUsedBytes,
+			"quota_available":  user.QuotaBytes - user.QuotaUsedBytes,
+		})
+
+	case http.MethodPost:
+		var req struct {
+			QuotaBytes int64 `json:"quota_bytes"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if err := db.UpdateUserQuota(user.ID, req.QuotaBytes); err != nil {
+			http.Error(w, fmt.Sprintf("Failed to update quota: %v", err), http.StatusInternalServerError)
+			return
+		}
+		jsonResponse(w, map[string]string{"status": "updated"})
+
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
 }

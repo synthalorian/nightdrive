@@ -1,9 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"log"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -179,8 +182,18 @@ func (s *Scanner) processTrack(path, basePath string, result *ScanResult) error 
 		result.TracksUpdated++
 	}
 
-	// Count unique artists and albums (approximation)
-	// In a real implementation, we'd track these more precisely
+	if metadata.Lyrics != "" {
+		s.db.SaveLyrics(track.ID, metadata.Lyrics, "embedded", false)
+	}
+
+	_, err = s.db.GetLyrics(track.ID)
+	if err != nil {
+		lrclibData, err := fetchLyricsFromLRCLIB(artistName, trackTitle, albumTitle)
+		if err == nil && lrclibData != nil && lrclibData.PlainLyrics != "" {
+			s.db.SaveLyrics(track.ID, lrclibData.PlainLyrics, "lrclib", lrclibData.SyncedLyrics != "")
+		}
+	}
+
 	result.ArtistsAdded = 0
 	result.AlbumsAdded = 0
 
@@ -197,6 +210,7 @@ type TrackMetadata struct {
 	Duration int
 	Bitrate  int
 	CoverArt []byte
+	Lyrics   string
 }
 
 // readMetadata reads metadata tags from an audio file
@@ -231,7 +245,53 @@ func readMetadata(path string) TrackMetadata {
 		meta.CoverArt = pic.Data
 	}
 
+	meta.Lyrics = extractLyricsFromTags(m)
+
 	return meta
+}
+
+func extractLyricsFromTags(m tag.Metadata) string {
+	// dhowden/tag doesn't expose lyrics directly
+	return ""
+}
+
+type lrclibResponse struct {
+	ID           int    `json:"id"`
+	TrackName    string `json:"trackName"`
+	ArtistName   string `json:"artistName"`
+	AlbumName    string `json:"albumName"`
+	Duration     float64 `json:"duration"`
+	Instrumental bool   `json:"instrumental"`
+	PlainLyrics  string `json:"plainLyrics"`
+	SyncedLyrics string `json:"syncedLyrics"`
+}
+
+func fetchLyricsFromLRCLIB(artist, title, album string) (*lrclibResponse, error) {
+	baseURL := "https://lrclib.net/api/get"
+	params := url.Values{}
+	params.Set("artist_name", artist)
+	params.Set("track_name", title)
+	if album != "" {
+		params.Set("album_name", album)
+	}
+
+	reqURL := baseURL + "?" + params.Encode()
+	resp, err := http.Get(reqURL)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("LRCLIB returned status %d", resp.StatusCode)
+	}
+
+	var result lrclibResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	return &result, nil
 }
 
 // parsePath extracts artist, album, and track info from a file path
