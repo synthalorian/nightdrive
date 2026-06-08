@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>NightDrive</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: #0a0a12;
+  color: #e0e0e0;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+h1 {
+  color: #00ffff;
+  text-shadow: 0 0 20px rgba(0,255,255,0.3);
+  font-size: 2rem;
+  padding: 1rem 2rem;
+  border-bottom: 1px solid #1a1a2e;
+}
+.container {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+.sidebar {
+  width: 250px;
+  background: #11111a;
+  border-right: 1px solid #1a1a2e;
+  padding: 1rem;
+  overflow-y: auto;
+}
+.sidebar h2 {
+  color: #ff00ff;
+  font-size: 0.9rem;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  margin-bottom: 0.5rem;
+}
+.nav-item {
+  padding: 0.5rem;
+  cursor: pointer;
+  border-radius: 4px;
+  margin-bottom: 0.25rem;
+  transition: background 0.2s;
+}
+.nav-item:hover {
+  background: #1a1a2e;
+}
+.nav-item.active {
+  background: #1a1a2e;
+  color: #00ffff;
+}
+.main {
+  flex: 1;
+  padding: 2rem;
+  overflow-y: auto;
+}
+.scan-btn {
+  background: #ff00ff;
+  color: #000;
+  border: none;
+  padding: 0.75rem 1.5rem;
+  font-family: inherit;
+  font-weight: bold;
+  cursor: pointer;
+  border-radius: 4px;
+  margin-bottom: 1rem;
+  transition: opacity 0.2s;
+}
+.scan-btn:hover { opacity: 0.8; }
+.scan-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.stats {
+  display: flex;
+  gap: 1rem;
+  margin-bottom: 2rem;
+}
+.stat-box {
+  background: #11111a;
+  border: 1px solid #1a1a2e;
+  padding: 1rem;
+  border-radius: 4px;
+  min-width: 120px;
+}
+.stat-box .number {
+  font-size: 1.5rem;
+  color: #00ffff;
+  font-weight: bold;
+}
+.stat-box .label {
+  font-size: 0.8rem;
+  color: #888;
+  text-transform: uppercase;
+}
+.list {
+  list-style: none;
+}
+.list-item {
+  padding: 0.75rem;
+  border-bottom: 1px solid #1a1a2e;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  transition: background 0.2s;
+}
+.list-item:hover {
+  background: #11111a;
+}
+.list-item .play-btn {
+  opacity: 0;
+  background: #00ffff;
+  color: #000;
+  border: none;
+  padding: 0.25rem 0.5rem;
+  border-radius: 3px;
+  cursor: pointer;
+  font-weight: bold;
+}
+.list-item:hover .play-btn {
+  opacity: 1;
+}
+.track-info {
+  flex: 1;
+}
+.track-title {
+  font-weight: 500;
+}
+.track-meta {
+  font-size: 0.8rem;
+  color: #888;
+}
+.player {
+  background: #11111a;
+  border-top: 1px solid #1a1a2e;
+  padding: 1rem 2rem;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+.player audio {
+  flex: 1;
+  height: 40px;
+}
+.player-info {
+  min-width: 200px;
+}
+.player-info .track-name {
+  color: #00ffff;
+  font-weight: bold;
+}
+.player-info .album-name {
+  font-size: 0.8rem;
+  color: #888;
+}
+.loading {
+  text-align: center;
+  padding: 2rem;
+  color: #888;
+}
+.error {
+  background: #2a1010;
+  color: #ff6666;
+  padding: 1rem;
+  border-radius: 4px;
+  margin-bottom: 1rem;
+}
+.hidden { display: none; }
+</style>
+</head>
+<body>
+<h1>&#127769; NIGHTDRIVE</h1>
+<div class="container">
+  <div class="sidebar">
+    <h2>Library</h2>
+    <div class="nav-item active" onclick="showView('library')">Artists</div>
+    <div class="nav-item" onclick="showView('tracks')">All Tracks</div>
+    <div class="nav-item" onclick="showView('playlists')">Playlists</div>
+    <h2 style="margin-top: 1rem">Tools</h2>
+    <div class="nav-item" onclick="scanLibrary()">Scan Library</div>
+  </div>
+  <div class="main" id="main">
+    <div id="library-view">
+      <button class="scan-btn" id="scanBtn" onclick="scanLibrary()">Scan Library</button>
+      <div class="stats" id="stats"></div>
+      <ul class="list" id="artists-list"></ul>
+    </div>
+    <div id="tracks-view" class="hidden">
+      <h2 style="color: #00ffff; margin-bottom: 1rem">All Tracks</h2>
+      <ul class="list" id="tracks-list"></ul>
+    </div>
+    <div id="playlists-view" class="hidden">
+      <h2 style="color: #00ffff; margin-bottom: 1rem">Playlists</h2>
+      <button class="scan-btn" onclick="createPlaylist()">New Playlist</button>
+      <ul class="list" id="playlists-list"></ul>
+    </div>
+    <div id="albums-view" class="hidden">
+      <button class="scan-btn" onclick="showView('library')">&#8592; Back to Artists</button>
+      <h2 style="color: #00ffff; margin: 1rem 0" id="albums-artist"></h2>
+      <ul class="list" id="albums-list"></ul>
+    </div>
+    <div id="album-tracks-view" class="hidden">
+      <button class="scan-btn" onclick="goBack()">&#8592; Back</button>
+      <h2 style="color: #00ffff; margin: 1rem 0" id="album-title"></h2>
+      <ul class="list" id="album-tracks-list"></ul>
+    </div>
+  </div>
+</div>
+<div class="player">
+  <div class="player-info">
+    <div class="track-name" id="now-playing">Nothing playing</div>
+    <div class="album-name" id="now-album"></div>
+  </div>
+  <audio id="audio-player" controls></audio>
+</div>
+
+<script>
+let currentView = 'library';
+let viewHistory = [];
+
+function showView(view) {
+  viewHistory.push(currentView);
+  currentView = view;
+  document.querySelectorAll('.main > div').forEach(function(el) { el.classList.add('hidden'); });
+  document.getElementById(view + '-view').classList.remove('hidden');
+  document.querySelectorAll('.nav-item').forEach(function(el) { el.classList.remove('active'); });
+
+  if (view === 'library') loadArtists();
+  else if (view === 'tracks') loadTracks();
+  else if (view === 'playlists') loadPlaylists();
+}
+
+function goBack() {
+  var prev = viewHistory.pop() || 'library';
+  showView(prev);
+}
+
+async function loadStats() {
+  try {
+    var res = await fetch('/api/stats');
+    var stats = await res.json();
+    document.getElementById('stats').innerHTML = 
+      '<div class="stat-box"><div class="number">' + (stats.artists || 0) + '</div><div class="label">Artists</div></div>' +
+      '<div class="stat-box"><div class="number">' + (stats.albums || 0) + '</div><div class="label">Albums</div></div>' +
+      '<div class="stat-box"><div class="number">' + (stats.tracks || 0) + '</div><div class="label">Tracks</div></div>' +
+      '<div class="stat-box"><div class="number">' + (stats.playlists || 0) + '</div><div class="label">Playlists</div></div>';
+  } catch (e) {
+    console.error('Failed to load stats:', e);
+  }
+}
+
+function escapeHtml(text) {
+  var div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+async function loadArtists() {
+  var list = document.getElementById('artists-list');
+  list.innerHTML = '<div class="loading">Loading artists...</div>';
+  try {
+    var res = await fetch('/api/artists');
+    var data = await res.json();
+    loadStats();
+    if (!data.artists || data.artists.length === 0) {
+      list.innerHTML = '<div class="loading">No artists found. Click "Scan Library" to scan your music.</div>';
+      return;
+    }
+    list.innerHTML = data.artists.map(function(a) {
+      return '<li class="list-item" onclick="loadAlbums(' + a.id + ', \'' + escapeHtml(a.name).replace(/'/g, "\\'") + '\')">' +
+        '<span>&#127925;</span><span>' + escapeHtml(a.name) + '</span></li>';
+    }).join('');
+  } catch (e) {
+    list.innerHTML = '<div class="error">Failed to load artists</div>';
+  }
+}
+
+async function loadAlbums(artistId, artistName) {
+  viewHistory.push(currentView);
+  currentView = 'albums';
+  document.querySelectorAll('.main > div').forEach(function(el) { el.classList.add('hidden'); });
+  document.getElementById('albums-view').classList.remove('hidden');
+  document.getElementById('albums-artist').textContent = artistName;
+
+  var list = document.getElementById('albums-list');
+  list.innerHTML = '<div class="loading">Loading albums...</div>';
+  try {
+    var res = await fetch('/api/artists/' + artistId);
+    var data = await res.json();
+    if (!data.albums || data.albums.length === 0) {
+      list.innerHTML = '<div class="loading">No albums found</div>';
+      return;
+    }
+    list.innerHTML = data.albums.map(function(al) {
+      return '<li class="list-item" onclick="loadAlbumTracks(' + al.id + ', \'' + escapeHtml(al.title).replace(/'/g, "\\'") + '\')">' +
+        '<span>&#128191;</span><span>' + escapeHtml(al.title) + (al.year ? ' (' + al.year + ')' : '') + '</span></li>';
+    }).join('');
+  } catch (e) {
+    list.innerHTML = '<div class="error">Failed to load albums</div>';
+  }
+}
+
+async function loadAlbumTracks(albumId, albumTitle) {
+  viewHistory.push(currentView);
+  currentView = 'album-tracks';
+  document.querySelectorAll('.main > div').forEach(function(el) { el.classList.add('hidden'); });
+  document.getElementById('album-tracks-view').classList.remove('hidden');
+  document.getElementById('album-title').textContent = albumTitle;
+
+  var list = document.getElementById('album-tracks-list');
+  list.innerHTML = '<div class="loading">Loading tracks...</div>';
+  try {
+    var res = await fetch('/api/albums/' + albumId);
+    var data = await res.json();
+    if (!data.tracks || data.tracks.length === 0) {
+      list.innerHTML = '<div class="loading">No tracks found</div>';
+      return;
+    }
+    list.innerHTML = data.tracks.map(function(t) {
+      return '<li class="list-item">' +
+        '<span class="track-info">' +
+        '<span class="track-title">' + (t.track_num ? t.track_num + '. ' : '') + escapeHtml(t.title) + '</span>' +
+        '<span class="track-meta">' + escapeHtml(t.format) + ' ' + (t.duration ? formatTime(t.duration) : '') + '</span>' +
+        '</span>' +
+        '<button class="play-btn" onclick="playTrack(' + t.id + ', \'' + escapeHtml(t.title).replace(/'/g, "\\'") + '\', \'' + escapeHtml(albumTitle).replace(/'/g, "\\'") + '\')">&#9654;</button>' +
+        '</li>';
+    }).join('');
+  } catch (e) {
+    list.innerHTML = '<div class="error">Failed to load tracks</div>';
+  }
+}
+
+async function loadTracks() {
+  var list = document.getElementById('tracks-list');
+  list.innerHTML = '<div class="loading">Loading tracks...</div>';
+  try {
+    var res = await fetch('/api/tracks?limit=100');
+    var data = await res.json();
+    if (!data.tracks || data.tracks.length === 0) {
+      list.innerHTML = '<div class="loading">No tracks found</div>';
+      return;
+    }
+    list.innerHTML = data.tracks.map(function(t) {
+      return '<li class="list-item">' +
+        '<span class="track-info">' +
+        '<span class="track-title">' + escapeHtml(t.title) + '</span>' +
+        '<span class="track-meta">' + escapeHtml(t.format) + '</span>' +
+        '</span>' +
+        '<button class="play-btn" onclick="playTrack(' + t.id + ', \'' + escapeHtml(t.title).replace(/'/g, "\\'") + '\', \'\')">&#9654;</button>' +
+        '</li>';
+    }).join('');
+  } catch (e) {
+    list.innerHTML = '<div class="error">Failed to load tracks</div>';
+  }
+}
+
+async function loadPlaylists() {
+  var list = document.getElementById('playlists-list');
+  list.innerHTML = '<div class="loading">Loading playlists...</div>';
+  try {
+    var res = await fetch('/api/playlists');
+    var data = await res.json();
+    if (!data.playlists || data.playlists.length === 0) {
+      list.innerHTML = '<div class="loading">No playlists yet</div>';
+      return;
+    }
+    list.innerHTML = data.playlists.map(function(p) {
+      return '<li class="list-item"><span>&#128203;</span><span>' + escapeHtml(p.name) + '</span></li>';
+    }).join('');
+  } catch (e) {
+    list.innerHTML = '<div class="error">Failed to load playlists</div>';
+  }
+}
+
+function playTrack(trackId, title, album) {
+  var player = document.getElementById('audio-player');
+  document.getElementById('now-playing').textContent = title;
+  document.getElementById('now-album').textContent = album || '';
+  player.src = '/api/stream/' + trackId;
+  player.play();
+}
+
+function formatTime(seconds) {
+  if (!seconds) return '';
+  var m = Math.floor(seconds / 60);
+  var s = seconds % 60;
+  return m + ':' + (s < 10 ? '0' : '') + s;
+}
+
+async function scanLibrary() {
+  var btn = document.getElementById('scanBtn');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Scanning...';
+  }
+  try {
+    var res = await fetch('/api/scan', { method: 'POST' });
+    var result = await res.json();
+    console.log('Scan result:', result);
+    alert('Scan complete! Added ' + result.tracks_added + ' tracks, updated ' + result.tracks_updated + '.');
+    loadArtists();
+  } catch (e) {
+    alert('Scan failed: ' + e.message);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = 'Scan Library';
+    }
+  }
+}
+
+async function createPlaylist() {
+  var name = prompt('Playlist name:');
+  if (!name) return;
+  try {
+    var res = await fetch('/api/playlists', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name })
+    });
+    if (res.ok) {
+      loadPlaylists();
+    } else {
+      alert('Failed to create playlist');
+    }
+  } catch (e) {
+    alert('Error: ' + e.message);
+  }
+}
+
+// Load initial data
+loadArtists();
+</script>
+</body>
+</html>
