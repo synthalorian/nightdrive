@@ -45,13 +45,14 @@ func (d *DB) InsertAlbum(artistID int64, title string, year int, cover string) (
 // InsertTrack inserts or updates a track.
 func (d *DB) InsertTrack(t *Track) (int64, error) {
 	res, err := d.Exec(
-		`INSERT INTO tracks(album_id, artist_id, title, disc_number, track_number, duration, bitrate, format, path, mtime, size)
-		 VALUES (:aid, :arid, :title, :disc, :track, :dur, :bit, :fmt, :path, :mtime, :size)
+		`INSERT INTO tracks(album_id, artist_id, title, disc_number, track_number, duration, bitrate, format, path, mtime, size, lyrics, media_type, playback_position)
+		 VALUES (:aid, :arid, :title, :disc, :track, :dur, :bit, :fmt, :path, :mtime, :size, :lyrics, :mediaType, :pos)
 		 ON CONFLICT(path) DO UPDATE SET
 		   album_id=excluded.album_id, artist_id=excluded.artist_id, title=excluded.title,
 		   disc_number=excluded.disc_number, track_number=excluded.track_number,
 		   duration=excluded.duration, bitrate=excluded.bitrate, format=excluded.format,
-		   mtime=excluded.mtime, size=excluded.size`,
+		   mtime=excluded.mtime, size=excluded.size, lyrics=excluded.lyrics, media_type=excluded.media_type,
+		   playback_position=excluded.playback_position`,
 		sql.Named("aid", t.AlbumID),
 		sql.Named("arid", t.ArtistID),
 		sql.Named("title", t.Title),
@@ -63,6 +64,9 @@ func (d *DB) InsertTrack(t *Track) (int64, error) {
 		sql.Named("path", t.Path),
 		sql.Named("mtime", t.Mtime),
 		sql.Named("size", t.Size),
+		sql.Named("lyrics", t.Lyrics),
+		sql.Named("mediaType", t.MediaType),
+		sql.Named("pos", t.PlaybackPosition),
 	)
 	if err != nil {
 		return 0, err
@@ -76,7 +80,8 @@ func (d *DB) TrackByID(id int64) (*Track, error) {
 		SELECT t.id, t.album_id, t.artist_id, t.title,
 		       COALESCE(a.name,'') AS artist_name,
 		       COALESCE(al.title,'') AS album_title,
-		       t.disc_number, t.track_number, t.duration, t.bitrate, t.format, t.path, t.mtime, t.size
+		       t.disc_number, t.track_number, t.duration, t.bitrate, t.format, t.path, t.mtime, t.size,
+		       t.lyrics, t.media_type, t.playback_position
 		FROM tracks t
 		LEFT JOIN artists a ON a.id = t.artist_id
 		LEFT JOIN albums al ON al.id = t.album_id
@@ -93,7 +98,8 @@ func (d *DB) Tracks(offset, limit int) ([]Track, error) {
 		SELECT t.id, t.album_id, t.artist_id, t.title,
 		       COALESCE(a.name,'') AS artist_name,
 		       COALESCE(al.title,'') AS album_title,
-		       t.disc_number, t.track_number, t.duration, t.bitrate, t.format, t.path, t.mtime, t.size
+		       t.disc_number, t.track_number, t.duration, t.bitrate, t.format, t.path, t.mtime, t.size,
+		       t.lyrics, t.media_type, t.playback_position
 		FROM tracks t
 		LEFT JOIN artists a ON a.id = t.artist_id
 		LEFT JOIN albums al ON al.id = t.album_id
@@ -116,7 +122,8 @@ func (d *DB) SearchTracks(q string, offset, limit int) ([]Track, error) {
 		SELECT t.id, t.album_id, t.artist_id, t.title,
 		       COALESCE(a.name,'') AS artist_name,
 		       COALESCE(al.title,'') AS album_title,
-		       t.disc_number, t.track_number, t.duration, t.bitrate, t.format, t.path, t.mtime, t.size
+		       t.disc_number, t.track_number, t.duration, t.bitrate, t.format, t.path, t.mtime, t.size,
+		       t.lyrics, t.media_type, t.playback_position
 		FROM tracks t
 		LEFT JOIN artists a ON a.id = t.artist_id
 		LEFT JOIN albums al ON al.id = t.album_id
@@ -179,7 +186,8 @@ func (d *DB) AlbumTracks(albumID int64) ([]Track, error) {
 		SELECT t.id, t.album_id, t.artist_id, t.title,
 		       COALESCE(a.name,'') AS artist_name,
 		       COALESCE(al.title,'') AS album_title,
-		       t.disc_number, t.track_number, t.duration, t.bitrate, t.format, t.path, t.mtime, t.size
+		       t.disc_number, t.track_number, t.duration, t.bitrate, t.format, t.path, t.mtime, t.size,
+		       t.lyrics, t.media_type, t.playback_position
 		FROM tracks t
 		LEFT JOIN artists a ON a.id = t.artist_id
 		LEFT JOIN albums al ON al.id = t.album_id
@@ -195,11 +203,14 @@ func (d *DB) AlbumTracks(albumID int64) ([]Track, error) {
 func scanTrack(scanner interface{ Scan(...interface{}) error }) (*Track, error) {
 	var t Track
 	var albumID, artistID sql.NullInt64
+	var lyrics sql.NullString
+	var mediaType sql.NullString
 	err := scanner.Scan(
 		&t.ID, &albumID, &artistID, &t.Title,
 		&t.ArtistName, &t.AlbumTitle,
 		&t.DiscNumber, &t.TrackNumber, &t.Duration, &t.Bitrate, &t.Format,
 		&t.Path, &t.Mtime, &t.Size,
+		&lyrics, &mediaType, &t.PlaybackPosition,
 	)
 	if err != nil {
 		return nil, err
@@ -211,6 +222,12 @@ func scanTrack(scanner interface{ Scan(...interface{}) error }) (*Track, error) 
 	if artistID.Valid {
 		v := artistID.Int64
 		t.ArtistID = &v
+	}
+	if lyrics.Valid {
+		t.Lyrics = lyrics.String
+	}
+	if mediaType.Valid {
+		t.MediaType = mediaType.String
 	}
 	return &t, nil
 }
@@ -264,7 +281,8 @@ func (d *DB) SmartTracks(query string) ([]Track, error) {
 		SELECT t.id, t.album_id, t.artist_id, t.title,
 		       COALESCE(a.name,'') AS artist_name,
 		       COALESCE(al.title,'') AS album_title,
-		       t.disc_number, t.track_number, t.duration, t.bitrate, t.format, t.path, t.mtime, t.size
+		       t.disc_number, t.track_number, t.duration, t.bitrate, t.format, t.path, t.mtime, t.size,
+		       t.lyrics, t.media_type, t.playback_position
 		FROM tracks t
 		LEFT JOIN artists a ON a.id = t.artist_id
 		LEFT JOIN albums al ON al.id = t.album_id
@@ -328,7 +346,8 @@ func (d *DB) PlaylistTracks(pid int64) ([]Track, error) {
 		SELECT t.id, t.album_id, t.artist_id, t.title,
 		       COALESCE(a.name,'') AS artist_name,
 		       COALESCE(al.title,'') AS album_title,
-		       t.disc_number, t.track_number, t.duration, t.bitrate, t.format, t.path, t.mtime, t.size
+		       t.disc_number, t.track_number, t.duration, t.bitrate, t.format, t.path, t.mtime, t.size,
+		       t.lyrics, t.media_type, t.playback_position
 		FROM playlist_tracks pt
 		JOIN tracks t ON t.id = pt.track_id
 		LEFT JOIN artists a ON a.id = t.artist_id
@@ -360,4 +379,53 @@ func (d *DB) RemovePlaylistTrack(pid, tid int64) error {
 func (d *DB) DeletePlaylist(pid int64) error {
 	_, err := d.Exec(`DELETE FROM playlists WHERE id = ?`, pid)
 	return err
+}
+
+// UpdateTrackPosition saves the playback position for a track.
+func (d *DB) UpdateTrackPosition(id int64, pos float64) error {
+	_, err := d.Exec(`UPDATE tracks SET playback_position = ? WHERE id = ?`, pos, id)
+	return err
+}
+
+// TrackLyrics returns lyrics for a track.
+func (d *DB) TrackLyrics(id int64) (string, error) {
+	var lyrics sql.NullString
+	err := d.QueryRow(`SELECT lyrics FROM tracks WHERE id = ?`, id).Scan(&lyrics)
+	if err != nil {
+		return "", err
+	}
+	if lyrics.Valid {
+		return lyrics.String, nil
+	}
+	return "", nil
+}
+
+// UpdateTrackLyrics saves lyrics for a track.
+func (d *DB) UpdateTrackLyrics(id int64, lyrics string) error {
+	_, err := d.Exec(`UPDATE tracks SET lyrics = ? WHERE id = ?`, lyrics, id)
+	return err
+}
+
+// TracksByMediaType returns tracks filtered by media type.
+func (d *DB) TracksByMediaType(mediaType string, offset, limit int) ([]Track, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 50
+	}
+	rows, err := d.Query(`
+		SELECT t.id, t.album_id, t.artist_id, t.title,
+		       COALESCE(a.name,'') AS artist_name,
+		       COALESCE(al.title,'') AS album_title,
+		       t.disc_number, t.track_number, t.duration, t.bitrate, t.format, t.path, t.mtime, t.size,
+		       t.lyrics, t.media_type, t.playback_position
+		FROM tracks t
+		LEFT JOIN artists a ON a.id = t.artist_id
+		LEFT JOIN albums al ON al.id = t.album_id
+		WHERE t.media_type = ?
+		ORDER BY a.name, al.title, t.disc_number, t.track_number
+		LIMIT ? OFFSET ?`, mediaType, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanTracks(rows)
 }

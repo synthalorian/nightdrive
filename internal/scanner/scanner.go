@@ -142,8 +142,9 @@ func (s *Scanner) handleFile(path string) {
 	if err != nil {
 		return
 	}
-	// Minimal metadata extraction: filename parsing.
 	track := parseMetadata(path, info)
+	track.MediaType = detectMediaType(path)
+	track.Lyrics = findLyrics(path)
 	artistID, err := s.db.InsertArtist(track.ArtistName)
 	if err != nil {
 		log.Printf("[scanner] artist insert %s: %v", path, err)
@@ -180,7 +181,6 @@ func parseMetadata(path string, info os.FileInfo) *db.Track {
 	artist := "Unknown Artist"
 	title := base
 	album := ""
-	// naive "Artist - Title" or "Artist - Album - Title" parsing
 	parts := strings.Split(base, " - ")
 	if len(parts) >= 2 {
 		artist = strings.TrimSpace(parts[0])
@@ -198,6 +198,42 @@ func parseMetadata(path string, info os.FileInfo) *db.Track {
 		Size:       info.Size(),
 		Format:     strings.TrimPrefix(filepath.Ext(path), "."),
 	}
+}
+
+func detectMediaType(path string) string {
+	lower := strings.ToLower(path)
+	if strings.Contains(lower, "podcast") {
+		return "podcast"
+	}
+	if strings.Contains(lower, "audiobook") || strings.Contains(lower, "audio book") || strings.Contains(lower, "books") {
+		return "audiobook"
+	}
+	return "music"
+}
+
+func findLyrics(path string) string {
+	base := strings.TrimSuffix(path, filepath.Ext(path))
+	for _, ext := range []string{".lrc", ".txt", ".lyrics"} {
+		p := base + ext
+		if data, err := os.ReadFile(p); err == nil {
+			return string(data)
+		}
+	}
+	dir := filepath.Dir(path)
+	name := strings.ToLower(filepath.Base(base))
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		ename := strings.ToLower(e.Name())
+		if strings.HasPrefix(ename, name) && (strings.HasSuffix(ename, ".lrc") || strings.HasSuffix(ename, ".txt") || strings.HasSuffix(ename, ".lyrics")) {
+			if data, err := os.ReadFile(filepath.Join(dir, e.Name())); err == nil {
+				return string(data)
+			}
+		}
+	}
+	return ""
 }
 
 // Stop halts the watcher.
