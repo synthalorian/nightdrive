@@ -1,0 +1,25 @@
+# NightDrive demo instance configuration.
+# Copy or symlink this file and run:
+#   ./nightdrive -config deploy/nightdrive.demo.toml
+#
+# This config enables all playback features and points to a read-only demo
+# music library. For a public-facing demo, place NightDrive behind a TLS
+# reverse proxy (see deploy/Caddyfile and deploy/nginx.conf).
+
+listen = "0.0.0.0:4040"
+database = "data/nightdrive.db"
+music_dir = ["/srv/music/demo"]
+scan_on_start = true
+
+[transcode]
+enabled = false
+format = "mp3"
+bitrate = 320
+
+[playback]
+crossfade_enabled = true
+crossfade_duration = 5.0
+gapless_enabled = true
+dsp_pipeline_enabled = true
+multi_room_enabled = true
+casting_enabled = true
