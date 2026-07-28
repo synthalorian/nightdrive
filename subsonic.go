@@ -14,17 +14,17 @@ const subsonicVersion = "1.16.1"
 
 // SubsonicResponse is the wrapper for all Subsonic API responses
 type SubsonicResponse struct {
-	XMLName    xml.Name    `xml:"subsonic-response" json:"-"`
-	Xmlns      string      `xml:"xmlns,attr" json:"-"`
-	Status     string      `xml:"status,attr" json:"status"`
-	Version    string      `xml:"version,attr" json:"version"`
-	AlbumList  *AlbumList      `xml:"albumList" json:"albumList,omitempty"`
-	Starred    *Starred        `xml:"starred" json:"starred,omitempty"`
-	Playlists  *Playlists      `xml:"playlists" json:"playlists,omitempty"`
-	License    *License        `xml:"license" json:"license,omitempty"`
-	Lyrics     *SubsonicLyrics `xml:"lyrics" json:"lyrics,omitempty"`
-	Playlist   *SubsonicPlaylist `xml:"playlist" json:"playlist,omitempty"`
-	Error      *SubError       `xml:"error" json:"error,omitempty"`
+	XMLName   xml.Name          `xml:"subsonic-response" json:"-"`
+	Xmlns     string            `xml:"xmlns,attr" json:"-"`
+	Status    string            `xml:"status,attr" json:"status"`
+	Version   string            `xml:"version,attr" json:"version"`
+	AlbumList *AlbumList        `xml:"albumList" json:"albumList,omitempty"`
+	Starred   *Starred          `xml:"starred" json:"starred,omitempty"`
+	Playlists *Playlists        `xml:"playlists" json:"playlists,omitempty"`
+	License   *License          `xml:"license" json:"license,omitempty"`
+	Lyrics    *SubsonicLyrics   `xml:"lyrics" json:"lyrics,omitempty"`
+	Playlist  *SubsonicPlaylist `xml:"playlist" json:"playlist,omitempty"`
+	Error     *SubError         `xml:"error" json:"error,omitempty"`
 }
 
 // AlbumList holds a list of albums

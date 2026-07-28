@@ -1,14 +1,17 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -24,18 +27,19 @@ var (
 )
 
 type Config struct {
-	MusicPath  string `json:"music_path"`
-	DBPath     string `json:"db_path"`
-	Host       string `json:"host"`
-	Port       int    `json:"port"`
+	MusicPath string `json:"music_path"`
+	DBPath    string `json:"db_path"`
+	Host      string `json:"host"`
+	Port      int    `json:"port"`
+	Watch     bool   `json:"watch"` // auto-scan library on filesystem changes
 }
 
 func main() {
 	cfg := Config{
-		MusicPath:  "~/music",
-		DBPath:     "nightdrive.db",
-		Host:       "0.0.0.0",
-		Port:       8080,
+		MusicPath: "~/music",
+		DBPath:    "nightdrive.db",
+		Host:      "0.0.0.0",
+		Port:      8080,
 	}
 
 	// Override music path from env if set
@@ -47,6 +51,11 @@ func main() {
 		if port, err := strconv.Atoi(envPort); err == nil {
 			cfg.Port = port
 		}
+	}
+
+	// Watch is off by default; enable with NIGHTDRIVE_WATCH=true
+	if envWatch := os.Getenv("NIGHTDRIVE_WATCH"); envWatch != "" {
+		cfg.Watch = envWatch == "true" || envWatch == "1"
 	}
 
 	// Initialize database
@@ -75,6 +84,19 @@ func main() {
 	}
 	if admin != nil {
 		log.Printf("Default admin API key: %s", admin.APIKey)
+	}
+
+	// Start library file watcher (auto-scan on changes) if enabled
+	var watcher *Watcher
+	if cfg.Watch {
+		watcher, err = NewWatcher(scanner, cfg.MusicPath, DefaultWatchDebounce)
+		if err != nil {
+			log.Printf("Warning: file watcher disabled: %v", err)
+			watcher = nil
+		} else if err := watcher.Start(); err != nil {
+			log.Printf("Warning: file watcher disabled: %v", err)
+			watcher = nil
+		}
 	}
 
 	mux := http.NewServeMux()
@@ -115,7 +137,30 @@ func main() {
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
 	log.Printf("NightDrive running on http://%s", addr)
 	log.Printf("Music library: %s", cfg.MusicPath)
-	log.Fatal(http.ListenAndServe(addr, mux))
+
+	srv := &http.Server{Addr: addr, Handler: mux}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Server failed: %v", err)
+		}
+	}()
+
+	<-ctx.Done()
+	log.Println("Shutting down...")
+
+	if watcher != nil {
+		watcher.Close()
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("Shutdown error: %v", err)
+	}
 }
 
 func jsonResponse(w http.ResponseWriter, data interface{}) {
@@ -636,9 +681,9 @@ func handleUserLastFM(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		jsonResponse(w, map[string]interface{}{
-			"lastfm_username":    user.LastFMUsername,
-			"lastfm_api_key":     user.LastFMAPIKey,
-			"lastfm_linked":      user.LastFMSessionKey != "",
+			"lastfm_username": user.LastFMUsername,
+			"lastfm_api_key":  user.LastFMAPIKey,
+			"lastfm_linked":   user.LastFMSessionKey != "",
 		})
 
 	case http.MethodPost:
