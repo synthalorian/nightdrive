@@ -188,7 +188,7 @@ func (s *Scanner) processTrack(path, basePath string, result *ScanResult) error 
 
 	_, err = s.db.GetLyrics(track.ID)
 	if err != nil {
-		lrclibData, err := fetchLyricsFromLRCLIB(artistName, trackTitle, albumTitle)
+		lrclibData, err := lyricsFetcher(artistName, trackTitle, albumTitle)
 		if err == nil && lrclibData != nil && lrclibData.PlainLyrics != "" {
 			s.db.SaveLyrics(track.ID, lrclibData.PlainLyrics, "lrclib", lrclibData.SyncedLyrics != "")
 		}
@@ -256,15 +256,19 @@ func extractLyricsFromTags(m tag.Metadata) string {
 }
 
 type lrclibResponse struct {
-	ID           int    `json:"id"`
-	TrackName    string `json:"trackName"`
-	ArtistName   string `json:"artistName"`
-	AlbumName    string `json:"albumName"`
+	ID           int     `json:"id"`
+	TrackName    string  `json:"trackName"`
+	ArtistName   string  `json:"artistName"`
+	AlbumName    string  `json:"albumName"`
 	Duration     float64 `json:"duration"`
-	Instrumental bool   `json:"instrumental"`
-	PlainLyrics  string `json:"plainLyrics"`
-	SyncedLyrics string `json:"syncedLyrics"`
+	Instrumental bool    `json:"instrumental"`
+	PlainLyrics  string  `json:"plainLyrics"`
+	SyncedLyrics string  `json:"syncedLyrics"`
 }
+
+// lyricsFetcher fetches lyrics from the network. It is a variable so tests
+// can stub it out and stay hermetic.
+var lyricsFetcher = fetchLyricsFromLRCLIB
 
 func fetchLyricsFromLRCLIB(artist, title, album string) (*lrclibResponse, error) {
 	baseURL := "https://lrclib.net/api/get"
@@ -296,9 +300,10 @@ func fetchLyricsFromLRCLIB(artist, title, album string) (*lrclibResponse, error)
 
 // parsePath extracts artist, album, and track info from a file path
 // Expected structures:
-//   artist/album/01 - track.mp3
-//   artist/album/track.mp3
-//   artist - album/track.mp3
+//
+//	artist/album/01 - track.mp3
+//	artist/album/track.mp3
+//	artist - album/track.mp3
 func parsePath(relPath string) (artist, album, track string, trackNum int) {
 	dir := filepath.Dir(relPath)
 	base := filepath.Base(relPath)

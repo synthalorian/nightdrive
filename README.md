@@ -9,7 +9,8 @@ A self-hosted music streaming server designed for large local libraries. No meta
 - 🗄️ **SQLite Database** — fast, reliable artist/album/track storage
 - 🔍 **Library Scanner** — recursively scans your music directory
 - 📋 **Playlist CRUD** — create, read, update, delete playlists
-- 🎛️ **Smart playlists** — rules-based, auto-updating (planned)
+- 🎛️ **Smart playlists** — rules-based, auto-updating (recently added, most played, genre, year, random)
+- 👁️ **File watcher** — recursive library watch with debounced auto-scan on changes
 - 📡 **Subsonic API** — compatible with existing clients (ping, getAlbumList, getStarred, getPlaylists, scrobble)
 - 🎨 **Retro player UI** — single-page web app with synthwave aesthetic
 - 🚀 **Single binary** — Go, minimal dependencies
@@ -29,6 +30,7 @@ go build -o nightdrive .
 ./nightdrive                          # Start server (default config)
 NIGHTDRIVE_MUSIC=/path/to/music ./nightdrive  # Custom music path
 PORT=8081 ./nightdrive               # Custom port
+NIGHTDRIVE_WATCH=true ./nightdrive   # Auto-scan library on file changes
 ```
 
 Then open `http://localhost:8080` in your browser.
@@ -59,6 +61,13 @@ The server creates a default admin user on first startup. The admin API key is p
 - `PUT /api/playlists/{id}` — Update playlist
 - `DELETE /api/playlists/{id}` — Delete playlist
 - `POST /api/playlists/{id}/tracks` — Add track to playlist
+
+### Smart Playlists
+- `GET /api/smart-playlists` — List smart playlists
+- `POST /api/smart-playlists` — Create smart playlist (`rule_type`: `recently_added`, `most_played`, `genre`, `year`, `random`)
+- `GET /api/smart-playlists/{id}` — Get smart playlist with resolved tracks
+- `PUT /api/smart-playlists/{id}` — Update smart playlist
+- `DELETE /api/smart-playlists/{id}` — Delete smart playlist
 
 ### Auth
 - `POST /api/auth/register` — Create user with username, returns api_key
@@ -113,21 +122,12 @@ music/
 ## Config
 
 Environment variables:
-- `NIGHTDRIVE_MUSIC` — Path to music library (default: ~/music)
-- `PORT` — Server port (default: 8080)
-
-```toml
-[music]
-library_path = "/home/synth/music"
-
-[server]
-host = "0.0.0.0"
-port = 8080
-
-[transcode]
-enabled = true
-bitrate = 320
-```
+- `NIGHTDRIVE_MUSIC` — Path to music library (default: `~/music`)
+- `PORT` — Server port (default: `8080`)
+- `NIGHTDRIVE_WATCH` — Set to `true` or `1` to watch the library recursively and
+  auto-scan on changes (default: off). Events are debounced (~3s of quiet) and
+  bursts coalesce into a single scan. Newly created directories are picked up
+  automatically.
 
 ## Roadmap
 
@@ -136,8 +136,8 @@ bitrate = 320
 - [x] Transcode on-the-fly (MP3, Opus)
 - [x] Album art extraction
 - [x] Multi-user support
-- [ ] File watcher for auto-scan
-- [ ] Smart playlists (rules engine)
+- [x] File watcher for auto-scan
+- [x] Smart playlists (rules engine)
 - [ ] Mobile app (or PWA)
 
 ## License
