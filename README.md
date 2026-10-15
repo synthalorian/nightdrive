@@ -1,3 +1,5 @@
+![nightdrive](.github/preview.png)
+
 # 🌙 NightDrive
 
 A self-hosted music streaming server designed for large local libraries. No metadata scraping from online services — pure file organization.
